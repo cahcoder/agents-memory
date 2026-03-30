@@ -2,9 +2,11 @@
 
 const { Command } = require('commander');
 const chalk = require('chalk');
+const ora = require('ora');
 const { spawn } = require('child_process');
 const path = require('path');
 const os = require('os');
+const fs = require('fs');
 
 const program = new Command();
 
@@ -13,22 +15,73 @@ program
   .description('Universal semantic memory layer for AI CLI tools')
   .version('1.0.0');
 
-// Find Python skill scripts
-const SKILL_DIR = path.join(__dirname, '..', 'skill');
+// Find Python skill scripts - works for both local dev and global npm install
+function findSkillDir() {
+  // Local dev: /srv/apps/semantic-clawmemory/src/cli.js → parent has skill/
+  const localSkill = path.join(__dirname, '..', 'skill');
+  if (fs.existsSync(localSkill)) return localSkill;
+  
+  // Global npm: /usr/lib/node_modules/semantic-clawmemory/src/cli.js
+  const globalSkill = path.join(__dirname, '..', 'skill');
+  if (fs.existsSync(globalSkill)) return globalSkill;
+  
+  // Fallback: look in common global locations
+  const globalPaths = [
+    '/usr/lib/node_modules/semantic-clawmemory/skill',
+    '/usr/local/lib/node_modules/semantic-clawmemory/skill',
+    path.join(os.homedir(), '.npm-global/lib/node_modules/semantic-clawmemory/skill')
+  ];
+  
+  for (const p of globalPaths) {
+    if (fs.existsSync(p)) return p;
+  }
+  
+  // Last resort: assume local
+  return localSkill;
+}
 
-function runPython(script, args = []) {
+const SKILL_DIR = findSkillDir();
+
+// Validate skill directory exists
+if (!fs.existsSync(SKILL_DIR)) {
+  console.error(chalk.red('Error: skill/ directory not found.'));
+  console.error(chalk.gray('Please ensure semantic-clawmemory is properly installed.'));
+  process.exit(1);
+}
+
+function runPython(script, args = [], showSpinner = true) {
   return new Promise((resolve, reject) => {
+    const spinner = showSpinner ? ora({
+      text: chalk.gray(`Running ${script}...`),
+      spinner: 'dots'
+    }).start() : null;
+    
     const py = spawn('python3', [path.join(SKILL_DIR, script), ...args], {
-      stdio: 'inherit',
+      stdio: ['pipe', 'pipe', 'pipe'],
       shell: false
     });
     
+    let stdout = '';
+    let stderr = '';
+    
+    py.stdout.on('data', (data) => { stdout += data.toString(); });
+    py.stderr.on('data', (data) => { stderr += data.toString(); });
+    
     py.on('close', (code) => {
+      if (spinner) spinner.stop();
+      
+      // Print stdout/stderr from Python scripts (they handle their own formatting)
+      if (stdout) process.stdout.write(stdout);
+      if (stderr) process.stderr.write(stderr);
+      
       if (code === 0) resolve();
       else reject(new Error(`Script exited with code ${code}`));
     });
     
-    py.on('error', reject);
+    py.on('error', (err) => {
+      if (spinner) spinner.fail(chalk.red('Error'));
+      reject(err);
+    });
   });
 }
 
