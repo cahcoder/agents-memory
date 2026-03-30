@@ -1,6 +1,6 @@
 {
   "name": "semantic-clawmemory",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Universal semantic memory layer for AI CLI tools. Remembers everything, forgets nothing.",
   "main": "src/index.js",
   "bin": {
