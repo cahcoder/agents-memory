@@ -212,43 +212,60 @@ program
 
 program
   .command('init-project')
-  .description('Create AGENTS.md in current directory for AI CLI tools')
+  .description('Create or append AGENTS.md section for semantic memory')
   .action(() => {
     const fs = require('fs');
     const path = require('path');
     const os = require('os');
 
-    const agentsMd = `# Semantic Memory
+    const memorySection = `
 
-## Memory Setup
-- MEMORY_DIR: ${os.homedir()}/.memory/chroma
-- SKILL_DIR: ~/.npm-global/lib/node_modules/semantic-clawmemory/skill
+---
 
-## PRE-LLM Hook (Before AI thinks)
-Before starting a task, query relevant memory:
-bash: semantic-clawmemory pre "{task description}"
+## Semantic Memory
+
+### Memory Setup
+\`\`\`bash
+export MEMORY_DIR="$HOME/.memory/chroma"
+export SKILL_DIR="~/.npm-global/lib/node_modules/semantic-clawmemory/skill"
+\`\`\`
+
+### PRE-LLM Hook (Before AI thinks)
+\`\`\`bash
+semantic-clawmemory pre "{task description}"
+\`\`\`
 When results found, inject them into context.
 
-## POST-LLM Hook (After AI responds)
-After successful response, store new learnings:
-bash: semantic-clawmemory post "{problem solved}" "{solution}"
+### POST-LLM Hook (After AI responds)
+\`\`\`bash
+semantic-clawmemory post "{problem solved}" "{solution}"
+\`\`\`
 Only store generic patterns, not specific values.
 
-## Essential Commands
-- semantic-clawmemory search <query>  - Search memory
-- semantic-clawmemory write <problem> <solution> - Store learning
-- semantic-clawmemory bootstrap <project> - Init project memory
+### Essential Commands
+- \`semantic-clawmemory search <query>\`  - Search memory
+- \`semantic-clawmemory write <problem> <solution>\` - Store learning
+- \`semantic-clawmemory bootstrap <project>\` - Init project memory
 `;
 
     const targetPath = path.join(process.cwd(), 'AGENTS.md');
-    if (fs.existsSync(targetPath)) {
-      console.log(chalk.yellow('AGENTS.md already exists here'));
-      console.log(chalk.gray('Delete it first if you want a fresh one'));
-      return;
-    }
 
-    fs.writeFileSync(targetPath, agentsMd);
-    console.log(chalk.green('✓ Created AGENTS.md'));
+    if (fs.existsSync(targetPath)) {
+      // Check if already has semantic memory section
+      const content = fs.readFileSync(targetPath, 'utf8');
+      if (content.includes('## Semantic Memory') || content.includes('semantic-clawmemory')) {
+        console.log(chalk.yellow('AGENTS.md already has semantic memory section'));
+        console.log(chalk.green('✓ Skipped - no changes needed'));
+        return;
+      }
+      // Append to existing file
+      fs.appendFileSync(targetPath, memorySection);
+      console.log(chalk.green('✓ Appended semantic memory to AGENTS.md'));
+    } else {
+      // Create new file
+      fs.writeFileSync(targetPath, `# Semantic Memory\n${memorySection}\n`);
+      console.log(chalk.green('✓ Created AGENTS.md with semantic memory'));
+    }
     console.log(chalk.gray('AI CLI tools will now use semantic memory'));
   });
 
