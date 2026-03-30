@@ -57,26 +57,46 @@ Similarity  │ Cosine similarity
 
 ## Installation
 
-### npm (Universal CLI Wrapper)
+### npm (Recommended - Universal)
 
 ```bash
+# Install globally
 npm install -g semantic-clawmemory
 
-# Configure (first run)
-semantic-clawmemory init
-
 # Verify
-semantic-clawmemory --version
+semantic-clawmemory --help
+
+# Initialize (first time)
+semantic-clawmemory init
 ```
 
-The npm package wraps the Python core — no Python knowledge required.
+The npm package auto-installs Python dependencies on first use.
 
-### Python (Direct)
+### Python (Direct/Development)
 
 ```bash
 # Clone
 git clone git@github.com:cahcoder/semantic-clawmemory.git
 cd semantic-clawmemory
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Or use the memory-wrapper script directly
+./scripts/memory-wrapper --help
+```
+
+### OpenClaw Plugin
+
+```bash
+# Via npm
+npm install -g semantic-clawmemory
+
+# Or clone + link
+git clone git@github.com:cahcoder/semantic-clawmemory.git
+cd semantic-clawmemory
+npm link
+```
 
 # Install dependencies
 pip install -r requirements.txt
