@@ -1,3 +1,24 @@
+---
+name: semantic-memory
+description: Universal semantic memory layer for AI CLI tools. Prevents context overflow and AI "gibberish" through semantic search with Chroma/HNSW.
+metadata:
+  {
+    "openclaw":
+      {
+        "requires": { "commands": ["python3"] },
+        "install":
+          [
+            {
+              "id": "pip",
+              "kind": "python",
+              "packages": ["chromadb", "sentence-transformers", "python-dateutil", "pyyaml"],
+              "label": "Install Python dependencies (pip)",
+            },
+          ],
+      },
+  }
+---
+
 # Semantic Memory Skill for OpenClaw
 
 Universal memory layer that prevents context overflow and AI "gibberish" through semantic search.
