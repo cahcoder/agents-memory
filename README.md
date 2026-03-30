@@ -111,6 +111,51 @@ export PATH="$PWD/skill:$PATH"
 openclaw plugin install semantic-clawmemory
 ```
 
+## After Install (Required for AI CLI Tools)
+
+After installing, you need to create an `AGENTS.md` file in your project directory. This tells AI CLI tools (Claude Code, Gemini CLI, OpenCode, etc.) to use semantic memory.
+
+### For AI CLI Tools (Claude Code, Gemini CLI, OpenCode, Codex, Cursor, etc.)
+
+**Create `AGENTS.md` in your project root:**
+
+```bash
+# In your project directory
+semantic-clawmemory init-project
+# OR manually:
+touch AGENTS.md
+```
+
+**Copy this content into `AGENTS.md`:**
+
+```markdown
+# Semantic Memory
+
+## Memory Setup
+- MEMORY_DIR: ~/.memory/chroma
+- SKILL_DIR: ~/.npm-global/lib/node_modules/semantic-clawmemory/skill
+
+## PRE-LLM Hook (Before AI thinks)
+Before starting a task, query relevant memory:
+bash: semantic-clawmemory pre "{task description}"
+When results found, inject them into context.
+
+## POST-LLM Hook (After AI responds)
+After successful response, store new learnings:
+bash: semantic-clawmemory post "{problem solved}" "{solution}"
+Only store generic patterns, not specific values.
+
+## Essential Commands
+- semantic-clawmemory search <query>  - Search memory
+- semantic-clawmemory write <problem> <solution> - Store learning
+- semantic-clawmemory bootstrap <project> - Init project memory
+```
+
+### For OpenClaw
+Skill auto-installed to `~/.openclaw/workspace/skills/semantic-clawmemory/`. No AGENTS.md needed.
+
+---
+
 ## Quick Start
 
 ```bash

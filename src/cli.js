@@ -210,4 +210,46 @@ program
     console.log(chalk.gray('Location: ~/.memory/chroma'));
   });
 
+program
+  .command('init-project')
+  .description('Create AGENTS.md in current directory for AI CLI tools')
+  .action(() => {
+    const fs = require('fs');
+    const path = require('path');
+    const os = require('os');
+
+    const agentsMd = `# Semantic Memory
+
+## Memory Setup
+- MEMORY_DIR: ${os.homedir()}/.memory/chroma
+- SKILL_DIR: ~/.npm-global/lib/node_modules/semantic-clawmemory/skill
+
+## PRE-LLM Hook (Before AI thinks)
+Before starting a task, query relevant memory:
+bash: semantic-clawmemory pre "{task description}"
+When results found, inject them into context.
+
+## POST-LLM Hook (After AI responds)
+After successful response, store new learnings:
+bash: semantic-clawmemory post "{problem solved}" "{solution}"
+Only store generic patterns, not specific values.
+
+## Essential Commands
+- semantic-clawmemory search <query>  - Search memory
+- semantic-clawmemory write <problem> <solution> - Store learning
+- semantic-clawmemory bootstrap <project> - Init project memory
+`;
+
+    const targetPath = path.join(process.cwd(), 'AGENTS.md');
+    if (fs.existsSync(targetPath)) {
+      console.log(chalk.yellow('AGENTS.md already exists here'));
+      console.log(chalk.gray('Delete it first if you want a fresh one'));
+      return;
+    }
+
+    fs.writeFileSync(targetPath, agentsMd);
+    console.log(chalk.green('✓ Created AGENTS.md'));
+    console.log(chalk.gray('AI CLI tools will now use semantic memory'));
+  });
+
 program.parse(process.argv);
