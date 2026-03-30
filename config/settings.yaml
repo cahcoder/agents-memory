@@ -1,0 +1,46 @@
+# Semantic Memory Configuration
+
+chroma:
+  # Where to persist Chroma database
+  persist_directory: "~/.memory/chroma"
+  
+  # Embedding model (all-MiniLM-L6-v2 is fast + good quality)
+  embedding_model: "all-MiniLM-L6-v2"
+  
+  # Embedding dimensions (384 for all-MiniLM-L6-v2)
+  dimensions: 384
+  
+  # Chroma embedded DB backend
+  backend: "duckdb+parquet"
+
+collections:
+  # Default importance for new entries (0.0 - 1.0)
+  default_importance: 0.5
+  
+  # Boost importance after N uses
+  auto_boost_threshold: 3
+  boost_amount: 0.1
+
+gc:
+  # Run dedup every N days
+  dedup_interval_days: 7
+  
+  # Archive entries older than N days
+  archive_after_days: 90
+  
+  # Keep trash for N days before permanent delete
+  trash_retention_days: 30
+
+memory:
+  # Pre-LLM: Max context entries to load
+  max_preload_entries: 10
+  
+  # Post-LLM: Minimum confidence to store learning
+  min_learning_confidence: 0.3
+  
+  # Importance decay: after N days of no use
+  decay_after_days: 30
+
+projects:
+  # Default project for unclassified entries
+  default: "general"
