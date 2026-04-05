@@ -157,6 +157,77 @@ let lastAssistantResponse = null;
 let messageCountSinceCompact = 0;
 
 // ───────────────────────────────────────────────────────────────
+// SMART SNIPPET EXTRACTION (context-aware, not arbitrary truncation)
+// ───────────────────────────────────────────────────────────────
+
+/**
+ * Extract the most relevant snippet from a memory entry.
+ * Strategy:
+ * 1. Always include problem statement (first line)
+ * 2. Find sentence(s) most relevant to query
+ * 3. Cap at ~500 chars total
+ */
+function extractSnippet(entry, query) {
+    const content = entry.content || "";
+    const collection = entry.collection || "memory";
+    const score = entry.score ? entry.score.toFixed(2) : "";
+    const prefix = `[${collection} score=${score}]`;
+    
+    // If entry is short enough, return full content
+    if (content.length <= 450) {
+        return { text: `${prefix} ${content}`, full: true };
+    }
+    
+    // Split into sentences (by common delimiters)
+    const sentences = content.split(/[.!?]+\s*/);
+    
+    // Query words for relevance matching
+    const queryWords = query.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+    
+    // Score each sentence by relevance to query
+    const scoredSentences = sentences.map((sentence, idx) => {
+        const lower = sentence.toLowerCase();
+        let relevance = 0;
+        for (const word of queryWords) {
+            if (lower.includes(word)) relevance += 1;
+        }
+        // Boost first sentence (problem statement) and code-containing sentences
+        if (idx === 0) relevance += 2;
+        if (sentence.includes("`") || sentence.includes("docker") || sentence.includes("systemctl")) {
+            relevance += 1;
+        }
+        return { sentence: sentence.trim(), relevance, isFirst: idx === 0 };
+    });
+    
+    // Sort by relevance (highest first)
+    scoredSentences.sort((a, b) => b.relevance - a.relevance);
+    
+    // Build snippet: problem statement + most relevant sentence
+    const problemStatement = scoredSentences[0].isFirst 
+        ? scoredSentences[0].sentence 
+        : sentences[0];
+    
+    let snippet = problemStatement;
+    
+    // Add most relevant sentence(s) until we hit limit
+    for (const scored of scoredSentences) {
+        if (scored.isFirst) continue;  // Already added
+        if (snippet.length + scored.sentence.length > 400) break;
+        snippet += ". " + scored.sentence;
+    }
+    
+    // Clean up and add prefix
+    snippet = snippet.replace(/\s+/g, ' ').trim();
+    if (!snippet.endsWith('.') && !snippet.endsWith('!') && !snippet.endsWith('?')) {
+        snippet += '...';
+    } else {
+        snippet = snippet.slice(0, -1) + '...';
+    }
+    
+    return { text: `${prefix} ${snippet}`, full: false };
+}
+
+// ───────────────────────────────────────────────────────────────
 // MESSAGE EXTRACTION
 // ───────────────────────────────────────────────────────────────
 function getMessageBody(event) {
@@ -215,24 +286,46 @@ async function messagePreprocessed(event) {
         // Filter results: only inject if score >= 0 (passed threshold)
         const validResults = (results || []).filter(r => (r.score || 0) >= 0);
         
-        if (validResults.length) {
-            const context = validResults.slice(0, 3).map(r => {
-                const col = r.collection || "memory";
-                const score = r.score ? ` score=${r.score.toFixed(2)}` : "";
-                const sim = r.similarity ? ` sim=${r.similarity.toFixed(2)}` : "";
-                // Show more context (300 chars)
-                const content = (r.content || "").slice(0, 300);
-                return `[${col}${score}${sim}] ${content}`;
-            }).join("\n");
-            
+        if (!validResults.length) {
+            console.log("[agents-memory] No results above threshold — skipping injection");
+            return;
+        }
+        
+        // Calculate token budget (estimate ~4 chars per token, leave room for response)
+        const MAX_INJECT_CHARS = 1500;  // ~375 tokens budget for memory context
+        
+        // Extract smart snippets from entries
+        const snippets = validResults.slice(0, 3).map(r => {
+            return extractSnippet(r, rawMsg);
+        });
+        
+        // Build context respecting token budget
+        let totalChars = 0;
+        let contextParts = [];
+        
+        for (let i = 0; i < snippets.length; i++) {
+            const snippet = snippets[i];
+            // Check if adding this snippet would exceed budget
+            if (totalChars + snippet.text.length + 50 > MAX_INJECT_CHARS) {
+                // If first entry and we still have room, add truncated version
+                if (i === 0 && totalChars < MAX_INJECT_CHARS - 100) {
+                    const remaining = MAX_INJECT_CHARS - totalChars - 50;
+                    contextParts.push(snippet.text.slice(0, remaining) + "...");
+                    totalChars += remaining + 50;
+                }
+                break;  // Stop adding more
+            }
+            contextParts.push(snippet.text);
+            totalChars += snippet.text.length + 50;
+        }
+        
+        if (contextParts.length) {
+            const context = contextParts.join("\n");
             event.messages.push({
                 role: "system",
                 content: "Relevant context:\n" + context
             });
-            
-            console.log(`[agents-memory] Injected ${validResults.length} results (${context.length} chars), cache size=${cache.size}`);
-        } else {
-            console.log("[agents-memory] No results above threshold — skipping injection");
+            console.log(`[agents-memory] Injected ${contextParts.length} snippets (${context.length} chars, budget=${MAX_INJECT_CHARS})`);
         }
     } catch (e) {
         console.warn("[agents-memory] Error:", e.message);
