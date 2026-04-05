@@ -156,10 +156,12 @@ def format_results(query_results):
     documents = query_results.get("documents", [[]])[0]
     metadatas = query_results.get("metadatas", [[]])[0]
     distances = query_results.get("distances", [[]])[0]
+    ids = query_results.get("ids", [[]])[0]
 
     for i, doc in enumerate(documents):
         meta = metadatas[i] if i < len(metadatas) else {}
         dist = distances[i] if i < len(distances) and distances[i] is not None else 0.0
+        entry_id = ids[i] if i < len(ids) else None
         # Clamp distance to valid range [0, 2], handle edge cases
         dist = max(0.0, min(2.0, float(dist) if dist else 0.0))
         # Chroma cosine distance: 0 = identical, 2 = opposite
@@ -167,6 +169,7 @@ def format_results(query_results):
         similarity = 1.0 - (dist / 2.0) if dist is not None else 0.0
 
         results.append({
+            "id": entry_id,  # Include entry ID for retrieval tracking
             "content": doc,
             "metadata": meta,
             "distance": dist,
@@ -404,6 +407,17 @@ def _score_result(entry, query="", recency_weight=0.05):
         except Exception:
             pass
     score += recency_boost
+    
+    # Retrieval feedback boost: frequently retrieved entries get a small boost
+    # This implements a simple feedback loop: entries retrieved often = useful
+    retrieval_count = metadata.get("retrieval_count", 0)
+    if retrieval_count > 0:
+        # Diminishing returns: each retrieval adds less boost
+        # retrieval_count 1-10: +0.01 per retrieval (max +0.10)
+        # retrieval_count 10+: logarithmic growth
+        import math
+        retrieval_boost = min(0.10, 0.01 * math.log1p(retrieval_count))
+        score += retrieval_boost
     
     return score
 

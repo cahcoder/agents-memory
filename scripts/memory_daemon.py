@@ -143,6 +143,58 @@ def set_cached_query(query: str, collection: str, limit: int, result: list):
     query_cache[key] = (time.time(), result)
 
 
+def update_retrieval_metadata(results):
+    """Update retrieval metadata for search results (feedback loop).
+    
+    This tracks which entries are retrieved and boosts their retrieval_count.
+    Frequent retrieval = useful entry = higher score in future.
+    """
+    from datetime import datetime
+    import threading
+    
+    def _update():
+        try:
+            client = get_chroma_client()
+            ef = get_embedding_function()
+            
+            for entry in results:
+                entry_id = entry.get("id")
+                collection_name = entry.get("collection")
+                if not entry_id or not collection_name:
+                    continue
+                
+                try:
+                    col = client.get_collection(name=collection_name, embedding_function=ef)
+                    # Get current metadata
+                    existing = col.get(ids=[entry_id])
+                    meta = existing.get("metadatas", [{}])[0] if existing.get("metadatas") else {}
+                except Exception:
+                    continue
+                
+                # Update retrieval stats
+                retrieval_count = meta.get("retrieval_count", 0) + 1
+                meta["retrieval_count"] = retrieval_count
+                meta["last_retrieved"] = datetime.now().isoformat()
+                
+                try:
+                    # Update in Chroma
+                    col.update(
+                        ids=[entry_id],
+                        metadatas=[meta]
+                    )
+                except Exception:
+                    pass  # Non-blocking update
+        except Exception:
+            pass  # Non-blocking
+    
+    # Run in background thread (non-blocking)
+    try:
+        thread = threading.Thread(target=_update, daemon=True)
+        thread.start()
+    except Exception:
+        pass  # Non-critical if threading fails
+
+
 def handle_search(args):
     """Search memory using shared search_memory function with caching."""
     global METRICS, CURRENT_PROJECT
@@ -161,6 +213,8 @@ def handle_search(args):
         METRICS["cache_hits"] += 1
         if cached:
             METRICS["searches_with_results"] += 1
+            # Still track retrievals from cache (async, non-blocking)
+            update_retrieval_metadata(cached)
         return {"data": cached, "cached": True}
     
     METRICS["cache_misses"] += 1
@@ -218,7 +272,8 @@ def handle_write(args):
         "use_count": 0,
         "last_used": datetime.now().isoformat(),
         "importance": max(0.0, min(1.0, float(importance))),
-        "language": "unknown"
+        "language": "unknown",
+        "retrieval_count": 0
     }
 
     type_to_collection = {
@@ -293,7 +348,8 @@ def handle_batch_write(args):
             "use_count": 0,
             "last_used": datetime.now().isoformat(),
             "importance": max(0.0, min(1.0, float(importance))),
-            "language": "unknown"
+            "language": "unknown",
+            "retrieval_count": 0
         }
         
         collection_name = type_to_collection.get(entry_type, "casual")
