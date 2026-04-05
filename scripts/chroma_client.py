@@ -239,56 +239,106 @@ def _search_single_collection(args):
 
 # Minimum similarity threshold — below this, results are discarded
 # Prevents hallucinations from low-quality matches
-# 0.6 = 60% similarity minimum (conservative to avoid false positives)
-MIN_SIMILARITY_THRESHOLD = 0.60
+# 0.65 = 65% similarity minimum (conservative)
+MIN_SIMILARITY_THRESHOLD = 0.65
 
 # Maximum boost from collection priority (caps how much priority can outweigh similarity)
 MAX_COLLECTION_BOOST = 0.15
 
+# Keyword match bonus: if query keywords appear in content, boost score
+KEYWORD_MATCH_BONUS = 0.15
 
-def _score_result(entry, recency_weight=0.05):
+# Minimum keyword matches required (if similarity is below threshold, keyword match can still qualify)
+MIN_KEYWORD_MATCHES = 1
+
+
+def _has_keyword_match(query: str, content: str) -> tuple[bool, float]:
+    """Check if query keywords appear in content.
+    
+    Returns: (has_match, match_ratio) where match_ratio is 0.0-1.0
+    """
+    if not query or not content:
+        return False, 0.0
+    
+    # Extract keywords (3+ char words, excluding stopwords)
+    stopwords = {'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+                 'to', 'of', 'and', 'or', 'but', 'in', 'on', 'at', 'by', 'for',
+                 'with', 'about', 'against', 'between', 'into', 'through', 'during',
+                 'before', 'after', 'above', 'below', 'from', 'up', 'down', 'out',
+                 'off', 'over', 'under', 'again', 'further', 'then', 'once',
+                 'here', 'there', 'when', 'where', 'why', 'how', 'all', 'each',
+                 'few', 'more', 'most', 'other', 'some', 'such', 'no', 'nor', 'not',
+                 'only', 'own', 'same', 'so', 'than', 'too', 'very', 'just', 'can', 'will'}
+    
+    query_words = [w.lower() for w in query.split() if len(w) >= 3 and w.lower() not in stopwords]
+    content_lower = content.lower()
+    
+    if not query_words:
+        return True, 1.0  # No extractable keywords, assume match
+    
+    matches = sum(1 for w in query_words if w in content_lower)
+    match_ratio = matches / len(query_words)
+    
+    return matches >= MIN_KEYWORD_MATCHES, match_ratio
+
+
+def _score_result(entry, query="", recency_weight=0.05):
     """Calculate weighted score for a search result.
     
     Factors:
     - similarity (base score) — PRIMARY factor
+    - keyword_match — cross-validation that query terms appear in content
     - collection priority — CAPPED to prevent low-sim results dominating
     - importance (normalized from 0.5 baseline)
     - recency boost (recent entries get slight boost)
     
-    Safety: Results below MIN_SIMILARITY_THRESHOLD return negative score
-    (will be filtered out by caller).
+    Safety: Results MUST have either:
+    - similarity >= MIN_SIMILARITY_THRESHOLD, OR
+    - keyword match (query terms appear in content)
+    
+    This dual-filter prevents hallucinations from pure vector similarity.
     """
     similarity = entry.get("similarity", 0)
-    
-    # Safety: reject clearly irrelevant results
-    # This is the PRIMARY filter against hallucinations
-    if similarity < MIN_SIMILARITY_THRESHOLD:
-        return -1.0  # Will be filtered out
-    
+    content = entry.get("content", "")
     collection = entry.get("collection", "casual")
     metadata = entry.get("metadata", {})
     
-    # Collection priority boost (CAPPED to prevent priority overwriting relevance)
+    # Cross-validation: check keyword match
+    has_keyword_match, match_ratio = _has_keyword_match(query, content)
+    
+    # PRIMARY filter: must pass similarity threshold OR keyword match
+    if similarity < MIN_SIMILARITY_THRESHOLD and not has_keyword_match:
+        return -1.0  # Will be filtered out
+    
+    # Base score from similarity
+    score = similarity
+    
+    # Keyword match bonus (applies even if similarity is low)
+    if has_keyword_match:
+        score += KEYWORD_MATCH_BONUS * match_ratio
+    
+    # Collection priority boost (CAPPED)
     col_boost = min(COLLECTION_PRIORITY.get(collection, 0), MAX_COLLECTION_BOOST)
+    score += col_boost
     
     # Importance boost (centered at 0.5)
     importance = metadata.get("importance", 0.5)
     importance_boost = (importance - 0.5) * 0.2
+    score += importance_boost
     
-    # Recency boost (entries accessed recently get slight boost)
+    # Recency boost
     recency_boost = 0
     last_used = metadata.get("last_used", "")
     if last_used:
         try:
             from datetime import datetime
             age_days = (datetime.now() - datetime.fromisoformat(last_used)).days
-            # Exponential decay: newer = higher boost
             recency_boost = max(0, recency_weight * (1 - age_days / 90))
         except Exception:
             pass
+    score += recency_boost
     
-    total_score = similarity + col_boost + importance_boost + recency_boost
-    return total_score
+    return score
 
 
 def search_memory(query, project=None, entry_type=None, limit=5, collection=None):
@@ -315,9 +365,9 @@ def search_memory(query, project=None, entry_type=None, limit=5, collection=None
                 **({"entry_type": entry_type} if entry_type else {})
             }, client, ef)
         )
-        # Score and sort
+        # Score and sort (pass query for keyword cross-validation)
         for entry in single_result:
-            entry["score"] = _score_result(entry)
+            entry["score"] = _score_result(entry, query=query)
         single_result.sort(key=lambda x: x.get("score", 0), reverse=True)
         return single_result[:limit]
 
@@ -348,11 +398,11 @@ def search_memory(query, project=None, entry_type=None, limit=5, collection=None
             except Exception:
                 pass
 
-    # Apply weighted scoring
+    # Apply weighted scoring (pass query for keyword cross-validation)
     for entry in all_results:
-        entry["score"] = _score_result(entry)
+        entry["score"] = _score_result(entry, query=query)
 
-    # Filter out negative scores (below similarity threshold)
+    # Filter out negative scores (below similarity threshold AND no keyword match)
     all_results = [r for r in all_results if r.get("score", -1) >= 0]
 
     # Sort by weighted score (highest first)

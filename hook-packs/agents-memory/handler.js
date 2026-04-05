@@ -17,7 +17,7 @@ const MEMORY_DIR = process.env.HOME + "/.memory/agents-memory";
 // ───────────────────────────────────────────────────────────────
 // CACHE (LRU with TTL)
 // ───────────────────────────────────────────────────────────────
-const CACHE_TTL = 30000;      // 30 seconds
+const CACHE_TTL = 300000;     // 5 minutes (300s) — conversations span longer than 30s
 const CACHE_MAX = 100;        // Max entries
 const cache = new Map();
 
@@ -75,7 +75,7 @@ function getSocket() {
             socket = null;
             socketPromise = null;
         });
-        s.setTimeout(5000, () => {
+        s.setTimeout(15000, () => {
             s.destroy();
             socket = null;
             socketPromise = null;
@@ -85,26 +85,50 @@ function getSocket() {
     return socketPromise;
 }
 
-function daemonCall(cmd, args) {
+function daemonCall(cmd, args, retries = 2) {
     return new Promise(async (resolve, reject) => {
-        try {
-            const s = await getSocket();
-            const req = JSON.stringify({cmd, args});
-            const data = [];
-            
-            s.write(req, () => {
-                s.once("data", (chunk) => {
-                    data.push(chunk);
-                    try {
-                        resolve(JSON.parse(data.join("")));
-                    } catch {
-                        reject(new Error("parse error"));
-                    }
+        let lastError = null;
+        
+        for (let attempt = 0; attempt <= retries; attempt++) {
+            try {
+                const s = await getSocket();
+                const req = JSON.stringify({cmd, args});
+                const data = [];
+                
+                s.write(req, () => {
+                    s.once("data", (chunk) => {
+                        data.push(chunk);
+                        try {
+                            const result = JSON.parse(data.join(""));
+                            // Check for daemon-level errors
+                            if (result && result.error) {
+                                reject(new Error(result.error));
+                            } else {
+                                resolve(result);
+                            }
+                        } catch (e) {
+                            reject(new Error("parse error"));
+                        }
+                    });
                 });
-            });
-        } catch (e) {
-            reject(e);
+                return;  // Success, exit retry loop
+                
+            } catch (e) {
+                lastError = e;
+                // On socket error, force reconnection on next attempt
+                socket = null;
+                socketPromise = null;
+                
+                if (attempt < retries) {
+                    // Wait before retry (exponential backoff)
+                    await new Promise(r => setTimeout(r, 100 * Math.pow(2, attempt)));
+                }
+            }
         }
+        
+        // All retries failed
+        console.warn(`[agents-memory] daemonCall failed after ${retries + 1} attempts:`, lastError?.message);
+        reject(lastError || new Error("daemon unavailable"));
     });
 }
 
@@ -166,6 +190,10 @@ let messageCountSinceCompact = 0;
  * 1. Always include problem statement (first line)
  * 2. Find sentence(s) most relevant to query
  * 3. Cap at ~500 chars total
+ * 
+ * Fixes:
+ * - URL-safe splitting (don't break on http:// URLs)
+ * - No hardcoded domain-specific boosts
  */
 function extractSnippet(entry, query) {
     const content = entry.content || "";
@@ -178,50 +206,61 @@ function extractSnippet(entry, query) {
         return { text: `${prefix} ${content}`, full: true };
     }
     
-    // Split into sentences (by common delimiters)
-    const sentences = content.split(/[.!?]+\s*/);
+    // Split into sentences (URL-safe: only split on sentence-ending punctuation NOT followed by alphanumeric)
+    // This avoids breaking URLs like http://example.com/path?query=1
+    const sentences = content.split(/(?<=[.!?])\s+(?=[A-Z])/g);
     
-    // Query words for relevance matching
-    const queryWords = query.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+    // Also split on newlines for entries with line breaks
+    const lines = content.split('\n');
+    const segments = sentences.length > 1 || sentences[0].length > 200 ? sentences : lines;
     
-    // Score each sentence by relevance to query
-    const scoredSentences = sentences.map((sentence, idx) => {
-        const lower = sentence.toLowerCase();
+    // Query words for relevance matching (exclude short/common words)
+    const stopwords = new Set(['the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been',
+        'to', 'of', 'and', 'or', 'but', 'in', 'on', 'at', 'by', 'for', 'with',
+        'this', 'that', 'these', 'those', 'it', 'its', 'from', 'have', 'has', 'had']);
+    const queryWords = query.toLowerCase().split(/\s+/)
+        .filter(w => w.length > 2 && !stopwords.has(w));
+    
+    // Score each segment by relevance to query
+    const scoredSegments = segments.map((segment, idx) => {
+        const lower = segment.toLowerCase();
         let relevance = 0;
+        
+        // Count query word matches
         for (const word of queryWords) {
-            if (lower.includes(word)) relevance += 1;
+            if (lower.includes(word)) relevance += 2;
         }
-        // Boost first sentence (problem statement) and code-containing sentences
-        if (idx === 0) relevance += 2;
-        if (sentence.includes("`") || sentence.includes("docker") || sentence.includes("systemctl")) {
-            relevance += 1;
-        }
-        return { sentence: sentence.trim(), relevance, isFirst: idx === 0 };
+        
+        // Boost first segment (problem statement)
+        if (idx === 0) relevance += 3;
+        
+        // Boost segments with technical content (code, paths, commands)
+        if (/[`\-$<>]/.test(segment)) relevance += 1;
+        
+        return { segment: segment.trim(), relevance, isFirst: idx === 0 };
     });
     
     // Sort by relevance (highest first)
-    scoredSentences.sort((a, b) => b.relevance - a.relevance);
+    scoredSegments.sort((a, b) => b.relevance - a.relevance);
     
-    // Build snippet: problem statement + most relevant sentence
-    const problemStatement = scoredSentences[0].isFirst 
-        ? scoredSentences[0].sentence 
-        : sentences[0];
+    // Build snippet: problem statement + most relevant segments
+    const problemStatement = scoredSegments[0].isFirst 
+        ? scoredSegments[0].segment 
+        : segments[0];
     
     let snippet = problemStatement;
     
-    // Add most relevant sentence(s) until we hit limit
-    for (const scored of scoredSentences) {
+    // Add most relevant segment(s) until we hit limit
+    for (const scored of scoredSegments) {
         if (scored.isFirst) continue;  // Already added
-        if (snippet.length + scored.sentence.length > 400) break;
-        snippet += ". " + scored.sentence;
+        if (snippet.length + scored.segment.length > 420) break;
+        snippet += " " + scored.segment;
     }
     
     // Clean up and add prefix
     snippet = snippet.replace(/\s+/g, ' ').trim();
     if (!snippet.endsWith('.') && !snippet.endsWith('!') && !snippet.endsWith('?')) {
         snippet += '...';
-    } else {
-        snippet = snippet.slice(0, -1) + '...';
     }
     
     return { text: `${prefix} ${snippet}`, full: false };
