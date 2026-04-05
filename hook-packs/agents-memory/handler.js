@@ -300,7 +300,6 @@ async function messagePreprocessed(event) {
     if (!isCommand(rawMsg)) {
         conversationHistory.push({ role: "user", content: rawMsg });
     }
-    lastAssistantResponse = null;
     messageCountSinceCompact++;
     
     try {
@@ -385,30 +384,28 @@ async function sessionCompactAfter(event) {
     console.log("[agents-memory] Session compacted, checking for learnings...");
     
     // Need meaningful conversation (skip if only commands were said)
-    if (conversationHistory.length < 1 || messageCountSinceCompact < 2) {
+    if (conversationHistory.length < 1) {
         console.log("[agents-memory] Skipping write - insufficient context");
         messageCountSinceCompact = 0;
         return;
     }
     
     try {
-        // Build problem from conversation context
+        // Store one entry per user message (not batched)
         const userMessages = conversationHistory
             .filter(m => m.role === "user")
-            .map(m => m.content)
-            .slice(-5);  // Last 5 user messages max
+            .map(m => m.content);
         
-        const problem = userMessages.join(" | ") || "(conversation)";
-        const solution = lastAssistantResponse || "(AI response captured in session)";
+        console.log("[agents-memory] 📚 Storing", userMessages.length, "conversations");
         
-        await daemonCall("write", {
-            problem: problem.slice(0, 200),
-            solution: solution.slice(0, 500),
-            type: "learning"
-        });
-        
-        console.log("[agents-memory] ✅ Stored learning:", problem.slice(0, 50));
-        console.log("[agents-memory] 📚 Conversation size:", conversationHistory.length, "messages");
+        for (let i = 0; i < userMessages.length; i++) {
+            await daemonCall("write", {
+                problem: userMessages[i].slice(0, 200),
+                solution: "(AI response captured in session)",
+                type: "learning"
+            });
+            console.log("[agents-memory] ✅ Stored", i + 1, "/", userMessages.length, ":", userMessages[i].slice(0, 30));
+        }
         
         // Reset after write
         conversationHistory = [];
