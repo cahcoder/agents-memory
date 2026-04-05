@@ -311,11 +311,12 @@ async function messagePreprocessed(event) {
             results = cached;
         } else {
             console.log("[agents-memory] Query:", originalQuery.slice(0, 30) + "...");
-            results = await daemonCall("search", {
+            const response = await daemonCall("search", {
                 query: query,
                 limit: 5,
                 project: event.context && event.context.project
             });
+            results = response && response.data && response.data.data;
             
             if (results && results.length) {
                 setCache(cacheKey, results);
