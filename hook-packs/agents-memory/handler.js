@@ -126,17 +126,22 @@ const STOPWORDS = new Set([
 function optimizeQuery(msg) {
     if (!msg || msg.length < 3) return msg;
     
-    // Truncate to 200 chars (keep start + end for context)
+    // Truncate to 200 chars at WORD BOUNDARIES (not mid-word)
     let query = msg;
     if (query.length > 200) {
-        // Keep first 150 + last 50 (filename/identifier often at end)
-        query = query.slice(0, 150) + "..." + query.slice(-50);
+        // Find last space before char 180 to avoid breaking words
+        const cutoff = query.lastIndexOf(' ', 180);
+        const startCut = cutoff > 100 ? cutoff : 180;
+        // Keep first part + last 50 chars (filename/identifier often at end)
+        query = query.slice(0, startCut) + "..." + query.slice(-50);
     }
     
-    // Remove stopwords
-    query = query.replace(/\b(\w+)\b/g, (match) => {
-        return STOPWORDS.has(match.toLowerCase()) ? '' : match;
-    });
+    // Remove stopwords (only if query is long enough to not lose meaning)
+    if (query.length > 50) {
+        query = query.replace(/\b(\w+)\b/g, (match) => {
+            return STOPWORDS.has(match.toLowerCase()) ? '' : match;
+        });
+    }
     
     // Clean up multiple spaces
     query = query.replace(/\s+/g, ' ').trim();
@@ -207,12 +212,17 @@ async function messagePreprocessed(event) {
             }
         }
         
-        if (results && results.length) {
-            const context = results.slice(0, 3).map(r => {
+        // Filter results: only inject if score >= 0 (passed threshold)
+        const validResults = (results || []).filter(r => (r.score || 0) >= 0);
+        
+        if (validResults.length) {
+            const context = validResults.slice(0, 3).map(r => {
                 const col = r.collection || "memory";
-                const content = (r.content || "").slice(0, 150);
+                const score = r.score ? ` score=${r.score.toFixed(2)}` : "";
                 const sim = r.similarity ? ` sim=${r.similarity.toFixed(2)}` : "";
-                return `[${col}${sim}] ${content}`;
+                // Show more context (300 chars)
+                const content = (r.content || "").slice(0, 300);
+                return `[${col}${score}${sim}] ${content}`;
             }).join("\n");
             
             event.messages.push({
@@ -220,7 +230,9 @@ async function messagePreprocessed(event) {
                 content: "Relevant context:\n" + context
             });
             
-            console.log("[agents-memory] Injected " + context.length + " chars, cache size=" + cache.size);
+            console.log(`[agents-memory] Injected ${validResults.length} results (${context.length} chars), cache size=${cache.size}`);
+        } else {
+            console.log("[agents-memory] No results above threshold — skipping injection");
         }
     } catch (e) {
         console.warn("[agents-memory] Error:", e.message);

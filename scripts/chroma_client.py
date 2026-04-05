@@ -159,13 +159,18 @@ def format_results(query_results):
 
     for i, doc in enumerate(documents):
         meta = metadatas[i] if i < len(metadatas) else {}
-        dist = distances[i] if i < len(distances) else 0.0
+        dist = distances[i] if i < len(distances) and distances[i] is not None else 0.0
+        # Clamp distance to valid range [0, 2], handle edge cases
+        dist = max(0.0, min(2.0, float(dist) if dist else 0.0))
+        # Chroma cosine distance: 0 = identical, 2 = opposite
+        # similarity = 1 - (dist / 2) normalizes to [0, 1]
+        similarity = 1.0 - (dist / 2.0) if dist is not None else 0.0
 
         results.append({
             "content": doc,
             "metadata": meta,
             "distance": dist,
-            "similarity": 1 - dist if dist else 1.0,
+            "similarity": max(0.0, similarity),  # Never return negative similarity
         })
 
     return results
@@ -214,34 +219,57 @@ def _search_single_collection(args):
 
         for i, doc in enumerate(documents):
             meta = metadatas[i] if i < len(metadatas) else {}
-            dist = distances[i] if i < len(distances) else 0
+            dist = distances[i] if i < len(distances) and distances[i] is not None else 0
+            # Clamp distance to valid range [0, 2], handle edge cases
+            dist = max(0.0, min(2.0, float(dist) if dist else 0.0))
+            # Chroma cosine distance: 0 = identical, 2 = opposite
+            # similarity = 1 - (dist / 2) normalizes to [0, 1]
+            similarity = 1.0 - (dist / 2.0) if dist is not None else 0.0
             results.append({
                 "collection": col_name,
                 "content": doc,
                 "metadata": meta,
                 "distance": dist,
-                "similarity": 1 - dist if dist else 1.0,
+                "similarity": max(0.0, similarity),  # Never return negative similarity
             })
     except Exception:
         pass  # Collection might not exist yet
     return results
 
 
+# Minimum similarity threshold — below this, results are discarded
+# Prevents hallucinations from low-quality matches
+# 0.6 = 60% similarity minimum (conservative to avoid false positives)
+MIN_SIMILARITY_THRESHOLD = 0.60
+
+# Maximum boost from collection priority (caps how much priority can outweigh similarity)
+MAX_COLLECTION_BOOST = 0.15
+
+
 def _score_result(entry, recency_weight=0.05):
     """Calculate weighted score for a search result.
     
     Factors:
-    - similarity (base score)
-    - collection priority
+    - similarity (base score) — PRIMARY factor
+    - collection priority — CAPPED to prevent low-sim results dominating
     - importance (normalized from 0.5 baseline)
     - recency boost (recent entries get slight boost)
+    
+    Safety: Results below MIN_SIMILARITY_THRESHOLD return negative score
+    (will be filtered out by caller).
     """
     similarity = entry.get("similarity", 0)
+    
+    # Safety: reject clearly irrelevant results
+    # This is the PRIMARY filter against hallucinations
+    if similarity < MIN_SIMILARITY_THRESHOLD:
+        return -1.0  # Will be filtered out
+    
     collection = entry.get("collection", "casual")
     metadata = entry.get("metadata", {})
     
-    # Collection priority boost
-    col_boost = COLLECTION_PRIORITY.get(collection, 0)
+    # Collection priority boost (CAPPED to prevent priority overwriting relevance)
+    col_boost = min(COLLECTION_PRIORITY.get(collection, 0), MAX_COLLECTION_BOOST)
     
     # Importance boost (centered at 0.5)
     importance = metadata.get("importance", 0.5)
@@ -323,6 +351,9 @@ def search_memory(query, project=None, entry_type=None, limit=5, collection=None
     # Apply weighted scoring
     for entry in all_results:
         entry["score"] = _score_result(entry)
+
+    # Filter out negative scores (below similarity threshold)
+    all_results = [r for r in all_results if r.get("score", -1) >= 0]
 
     # Sort by weighted score (highest first)
     all_results.sort(key=lambda x: x.get("score", 0), reverse=True)
