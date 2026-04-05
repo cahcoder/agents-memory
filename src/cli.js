@@ -747,25 +747,71 @@ Only store generic patterns, not specific values.
 - \`agents-memory bootstrap <project>\` - Init project memory
 `;
 
+    // ── AGENTS.md (CLI tools) ─────────────────────────────────
     const targetPath = path.join(process.cwd(), 'AGENTS.md');
 
     if (fs.existsSync(targetPath)) {
-      // Check if already has semantic memory section
       const content = fs.readFileSync(targetPath, 'utf8');
       if (content.includes('## Semantic Memory') || content.includes('agents-memory')) {
         console.log(chalk.yellow('AGENTS.md already has semantic memory section'));
-        console.log(chalk.green('✓ Skipped - no changes needed'));
-        return;
+      } else {
+        fs.appendFileSync(targetPath, memorySection);
+        console.log(chalk.green('✓ Appended semantic memory to AGENTS.md'));
       }
-      // Append to existing file
-      fs.appendFileSync(targetPath, memorySection);
-      console.log(chalk.green('✓ Appended semantic memory to AGENTS.md'));
     } else {
-      // Create new file
       fs.writeFileSync(targetPath, `# Semantic Memory\n${memorySection}\n`);
       console.log(chalk.green('✓ Created AGENTS.md with semantic memory'));
     }
-    console.log(chalk.gray('AI CLI tools will now use semantic memory'));
+
+    // ── OpenClaw Workspace (TOOLS.md) ─────────────────────────
+    const openclawWorkspace = path.join(os.homedir(), '.openclaw', 'workspace', 'TOOLS.md');
+    if (fs.existsSync(openclawWorkspace)) {
+      const toolsContent = fs.readFileSync(openclawWorkspace, 'utf8');
+      const agentsMemorySection = `
+
+## agents-memory (Semantic Memory)
+
+**Auto-handled by hooks (no manual action needed):**
+- Pre-LLM: Memory queried automatically before AI thinks
+- Post-LLM: Learnings stored after session compaction
+
+**Manual commands:**
+- \`agents-memory search <query>\` - Search semantic memory
+- \`agents-memory write <problem>\` - Store a learning/solution
+- \`agents-memory bootstrap <project>\` - Bootstrap project memory
+
+**When user asks to store something:**
+Use \`agents-memory write\` to persist learnings.
+`;
+      if (toolsContent.includes('## agents-memory')) {
+        console.log(chalk.yellow('TOOLS.md already has agents-memory section'));
+      } else {
+        fs.appendFileSync(openclawWorkspace, agentsMemorySection);
+        console.log(chalk.green('✓ Appended agents-memory to TOOLS.md'));
+      }
+    }
+
+    // ── OpenClaw Workspace (SOUL.md) ───────────────────────────
+    const soulPath = path.join(os.homedir(), '.openclaw', 'workspace', 'SOUL.md');
+    if (fs.existsSync(soulPath)) {
+      const soulContent = fs.readFileSync(soulPath, 'utf8');
+      const memoryNote = `
+
+## Memory
+
+I have semantic memory via agents-memory hook. The system automatically:
+- Queries relevant memories before responding (Pre-LLM)
+- Stores learnings after session compaction (Post-LLM)
+`;
+      if (soulContent.includes('semantic memory') || soulContent.includes('agents-memory')) {
+        console.log(chalk.yellow('SOUL.md already mentions memory'));
+      } else {
+        fs.appendFileSync(soulPath, memoryNote);
+        console.log(chalk.green('✓ Updated SOUL.md with memory awareness'));
+      }
+    }
+
+    console.log(chalk.gray('AI tools will now use semantic memory'));
   });
 
 program.parse(process.argv);
