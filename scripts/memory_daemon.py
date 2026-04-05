@@ -49,6 +49,21 @@ QUERY_CACHE_MAX = 200
 QUERY_CACHE_TTL = 300  # 5 minutes
 query_cache = OrderedDict()
 
+# Metrics tracking
+METRICS = {
+    "searches": 0,           # Total search calls
+    "searches_with_results": 0,  # Searches that returned results
+    "writes": 0,             # Total write calls
+    "writes_rejected": 0,     # Writes rejected (quality check, dedup)
+    "writes_updated": 0,     # Writes that updated existing entries
+    "cache_hits": 0,         # Cache hits
+    "cache_misses": 0,       # Cache misses
+    "projects": set(),       # Unique projects seen
+}
+
+# Current project context (can be set by client)
+CURRENT_PROJECT = "default"
+
 
 def cleanup():
     """Remove stale socket and PID files."""
@@ -130,16 +145,25 @@ def set_cached_query(query: str, collection: str, limit: int, result: list):
 
 def handle_search(args):
     """Search memory using shared search_memory function with caching."""
+    global METRICS, CURRENT_PROJECT
+    
     query = args.get("query", "")
-    project = args.get("project")
+    project = args.get("project") or CURRENT_PROJECT
     entry_type = args.get("entry_type")
     limit = args.get("limit", 5)
     collection = args.get("collection")
     
+    METRICS["searches"] += 1
+    
     # Check cache first
     cached = get_cached_query(query, collection, limit)
     if cached is not None:
+        METRICS["cache_hits"] += 1
+        if cached:
+            METRICS["searches_with_results"] += 1
         return {"data": cached, "cached": True}
+    
+    METRICS["cache_misses"] += 1
     
     # Execute search
     results = search_memory(
@@ -150,6 +174,10 @@ def handle_search(args):
         collection=collection
     )
     
+    # Track metrics
+    if results:
+        METRICS["searches_with_results"] += 1
+    
     # Cache results
     set_cached_query(query, collection, limit, results)
     
@@ -158,6 +186,7 @@ def handle_search(args):
 
 def handle_write(args):
     """Write new entry to memory."""
+    global METRICS, CURRENT_PROJECT
     import uuid
     from datetime import datetime
 
@@ -166,12 +195,16 @@ def handle_write(args):
 
     problem = args.get("problem", "")
     solution = args.get("solution", "")
-    project = args.get("project", "default")
+    project = args.get("project") or CURRENT_PROJECT
     entry_type = args.get("entry_type", args.get("type", "chat"))
     importance = args.get("importance", 0.5)
 
+    METRICS["writes"] += 1
+    METRICS["projects"].add(project)
+
     # Basic validation
     if not problem or not problem.strip():
+        METRICS["writes_rejected"] += 1
         raise ValueError("problem must not be empty")
 
     content_parts = [f"Problem: {problem}"]
@@ -203,8 +236,79 @@ def handle_write(args):
     return {"id": entry_id, "collection": collection_name, "status": "stored"}
 
 
+def handle_batch_write(args):
+    """Write multiple entries to memory in one call.
+    
+    Args:
+        entries: list of {
+            problem: str,
+            solution: str (optional),
+            project: str (optional),
+            entry_type: str (optional),
+            importance: float (optional)
+        }
+    """
+    global METRICS
+    import uuid
+    from datetime import datetime
+
+    entries = args.get("entries", [])
+    if not entries:
+        return {"results": [], "status": "no_entries"}
+
+    client = get_chroma_client()
+    ef = get_embedding_function()
+
+    type_to_collection = {
+        "solution": "tasks", "skill": "tasks", "fact": "important",
+        "decision": "progress", "baseline": "core", "chat": "casual",
+        "prompt": "prompts"
+    }
+
+    results = []
+    for entry in entries:
+        METRICS["writes"] += 1
+        
+        problem = entry.get("problem", "")
+        if not problem or not problem.strip():
+            METRICS["writes_rejected"] += 1
+            results.append({"status": "rejected", "reason": "empty problem"})
+            continue
+        
+        solution = entry.get("solution", "")
+        project = entry.get("project") or CURRENT_PROJECT
+        entry_type = entry.get("entry_type", "chat")
+        importance = entry.get("importance", 0.5)
+        
+        METRICS["projects"].add(project)
+        
+        content_parts = [f"Problem: {problem}"]
+        if solution:
+            content_parts.append(f"Solution: {solution}")
+        content = "\n\n".join(content_parts)
+        
+        metadata = {
+            "project": project,
+            "entry_type": entry_type,
+            "use_count": 0,
+            "last_used": datetime.now().isoformat(),
+            "importance": max(0.0, min(1.0, float(importance))),
+            "language": "unknown"
+        }
+        
+        collection_name = type_to_collection.get(entry_type, "casual")
+        collection = client.get_or_create_collection(name=collection_name, embedding_function=ef)
+        entry_id = str(uuid.uuid4())
+        collection.add(ids=[entry_id], documents=[content], metadatas=[metadata])
+        results.append({"id": entry_id, "collection": collection_name, "status": "stored"})
+    
+    log.info("Batch wrote %d entries", len(results))
+    return {"results": results, "total": len(results)}
+
+
 def handle_stats(args):
-    """Return memory statistics across all collections + cache stats."""
+    """Return memory statistics across all collections + cache + metrics stats."""
+    global METRICS, CURRENT_PROJECT
     client = get_chroma_client()
     ef = get_embedding_function()
 
@@ -222,13 +326,62 @@ def handle_stats(args):
     stats["_total"] = total
     
     # Add cache statistics
+    cache_hit_rate = 0
+    total_cache_ops = METRICS["cache_hits"] + METRICS["cache_misses"]
+    if total_cache_ops > 0:
+        cache_hit_rate = METRICS["cache_hits"] / total_cache_ops
+    
     stats["_cache"] = {
         "query_cache_size": len(query_cache),
         "query_cache_max": QUERY_CACHE_MAX,
-        "query_cache_ttl": QUERY_CACHE_TTL
+        "query_cache_ttl": QUERY_CACHE_TTL,
+        "hits": METRICS["cache_hits"],
+        "misses": METRICS["cache_misses"],
+        "hit_rate": round(cache_hit_rate, 3)
+    }
+    
+    # Add metrics
+    search_hit_rate = 0
+    if METRICS["searches"] > 0:
+        search_hit_rate = METRICS["searches_with_results"] / METRICS["searches"]
+    
+    stats["_metrics"] = {
+        "searches": METRICS["searches"],
+        "searches_with_results": METRICS["searches_with_results"],
+        "search_hit_rate": round(search_hit_rate, 3),
+        "writes": METRICS["writes"],
+        "writes_rejected": METRICS["writes_rejected"],
+        "writes_updated": METRICS["writes_updated"],
+        "unique_projects": len(METRICS["projects"]),
+        "current_project": CURRENT_PROJECT
     }
     
     return stats
+
+
+def handle_set_project(args):
+    """Set the current project context for searches and writes."""
+    global CURRENT_PROJECT
+    project = args.get("project", "default")
+    CURRENT_PROJECT = project
+    METRICS["projects"].add(project)
+    return {"project": CURRENT_PROJECT, "status": "set"}
+
+
+def handle_reset_metrics(args):
+    """Reset metrics counters."""
+    global METRICS
+    METRICS = {
+        "searches": 0,
+        "searches_with_results": 0,
+        "writes": 0,
+        "writes_rejected": 0,
+        "writes_updated": 0,
+        "cache_hits": 0,
+        "cache_misses": 0,
+        "projects": METRICS.get("projects", set()),
+    }
+    return {"status": "metrics_reset"}
 
 
 def handle_client(conn):
@@ -262,8 +415,14 @@ def handle_client(conn):
                 result = {"ok": True, "data": handle_search(args)}
             elif cmd == "write":
                 result = {"ok": True, "data": handle_write(args)}
+            elif cmd == "batch_write":
+                result = {"ok": True, "data": handle_batch_write(args)}
             elif cmd == "stats":
                 result = {"ok": True, "data": handle_stats(args)}
+            elif cmd == "set_project":
+                result = {"ok": True, "data": handle_set_project(args)}
+            elif cmd == "reset_metrics":
+                result = {"ok": True, "data": handle_reset_metrics(args)}
             elif cmd == "ping":
                 result = {"ok": True, "data": "pong"}
             else:

@@ -22,7 +22,7 @@ def memory_search(query, project=None, entry_type=None, limit=5, collection=None
     
     Args:
         query: Search query text
-        project: Filter by project name
+        project: Filter by project name (default: "default" or current context)
         entry_type: Filter by entry type
         limit: Maximum results
         collection: If specified, search only this collection
@@ -33,6 +33,7 @@ def memory_search(query, project=None, entry_type=None, limit=5, collection=None
         entry_type=entry_type,
         limit=limit,
         collection=collection,
+        use_expansion=True,  # Query expansion enabled by default
     )
 
 

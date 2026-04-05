@@ -365,6 +365,91 @@ program
   });
 
 program
+  .command('batch-write')
+  .description('Store multiple learnings at once (from JSON)')
+  .option('-f, --file <path>', 'JSON file with entries array')
+  .option('-j, --json <json>', 'JSON string with entries array')
+  .option('-p, --project <name>', 'Default project for entries')
+  .action(async (opts) => {
+    let entries = [];
+    if (opts.file) {
+      try {
+        entries = JSON.parse(fs.readFileSync(opts.file, 'utf8'));
+      } catch (e) {
+        console.error(chalk.red('Error reading file:'), e.message);
+        process.exit(1);
+      }
+    } else if (opts.json) {
+      try {
+        entries = JSON.parse(opts.json);
+      } catch (e) {
+        console.error(chalk.red('Error parsing JSON:'), e.message);
+        process.exit(1);
+      }
+    } else {
+      console.error(chalk.red('Error: must provide --file or --json'));
+      process.exit(1);
+    }
+    
+    if (!Array.isArray(entries)) {
+      console.error(chalk.red('Error: JSON must be an array of entries'));
+      process.exit(1);
+    }
+    
+    // Send batch write via socket
+    const sockPath = path.join(os.homedir(), '.memory', 'agents-memory', 'daemon.sock');
+    const sock = net.createConnection(sockPath);
+    
+    sock.on('connect', () => {
+      const req = JSON.stringify({cmd: 'batch_write', args: {entries, project: opts.project}});
+      sock.write(req + '\n');
+    });
+    
+    sock.on('data', (data) => {
+      const result = JSON.parse(data.toString());
+      if (result.ok) {
+        console.log(chalk.green(`Batch wrote ${result.data.total} entries`));
+      } else {
+        console.error(chalk.red('Error:'), result.error);
+      }
+      sock.end();
+    });
+    
+    sock.on('error', (e) => {
+      console.error(chalk.red('Socket error:'), e.message);
+      process.exit(1);
+    });
+  });
+
+program
+  .command('set-project <name>')
+  .description('Set current project context for memory operations')
+  .action(async (name) => {
+    const sockPath = path.join(os.homedir(), '.memory', 'agents-memory', 'daemon.sock');
+    const sock = net.createConnection(sockPath);
+    
+    sock.on('connect', () => {
+      const req = JSON.stringify({cmd: 'set_project', args: {project: name}});
+      sock.write(req + '\n');
+    });
+    
+    sock.on('data', (data) => {
+      const result = JSON.parse(data.toString());
+      if (result.ok) {
+        console.log(chalk.green(`Project set to: ${result.data.project}`));
+      } else {
+        console.error(chalk.red('Error:'), result.error);
+      }
+      sock.end();
+    });
+    
+    sock.on('error', (e) => {
+      console.error(chalk.red('Socket error:'), e.message);
+      process.exit(1);
+    });
+  });
+
+program
   .command('pre <input>')
   .description('PRE-LLM hook: query and inject context')
   .option('-p, --project <name>', 'Project name')
