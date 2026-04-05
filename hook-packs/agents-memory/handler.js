@@ -8,11 +8,69 @@
  * - Connection keep-alive
  */
 
+const fs = require("fs");
+const os = require("os");
 const net = require("net");
 const path = require("path");
 
 const SOCKET = process.env.HOME + "/.memory/agents-memory/daemon.sock";
 const MEMORY_DIR = process.env.HOME + "/.memory/agents-memory";
+const SESSIONS_DIR = path.join(os.homedir(), ".openclaw", "agents", "main", "sessions");
+
+// ───────────────────────────────────────────────────────────────
+// SESSION FILE HELPERS
+// ───────────────────────────────────────────────────────────────
+function getSessionFile(sessionKey) {
+    const sessionsFile = path.join(SESSIONS_DIR, "sessions.json");
+    try {
+        const data = JSON.parse(fs.readFileSync(sessionsFile, "utf8"));
+        const sessionEntry = data[sessionKey];
+        if (sessionEntry && sessionEntry.sessionFile) {
+            return sessionEntry.sessionFile;
+        }
+    } catch (e) {}
+    return null;
+}
+
+function getLastAssistantResponse(sessionKey, maxLines = 50) {
+    const sessionFile = getSessionFile(sessionKey);
+    if (!sessionFile) return null;
+    
+    try {
+        const lines = [];
+        const stream = fs.createReadStream(sessionFile, { encoding: "utf8", limit: 2 * 1024 * 1024 });
+        let buffer = "";
+        
+        return new Promise((resolve) => {
+            stream.on("data", (chunk) => {
+                buffer += chunk;
+                const parts = buffer.split("\n");
+                buffer = parts.pop(); // Keep incomplete last line
+                for (const line of parts) {
+                    try {
+                        const obj = JSON.parse(line);
+                        if (obj.message && obj.message.role === "assistant") {
+                            const content = obj.message.content;
+                            if (Array.isArray(content)) {
+                                for (const block of content) {
+                                    if (block.type === "text" && block.text) {
+                                        lines.push(block.text);
+                                    }
+                                }
+                            }
+                        }
+                    } catch (e) {}
+                }
+            });
+            stream.on("end", () => {
+                resolve(lines.slice(-maxLines).join("\n"));
+            });
+            stream.on("error", () => resolve(null));
+        });
+    } catch (e) {
+        return Promise.resolve(null);
+    }
+}
 
 // ───────────────────────────────────────────────────────────────
 // CACHE (LRU with TTL)
@@ -390,18 +448,32 @@ async function sessionCompactAfter(event) {
         return;
     }
     
+    // Get session key from event
+    const sessionKey = event.context && (event.context.sessionKey || event.context.sessionId);
+    
+    // Get last assistant response from session file
+    let lastAssistantText = null;
+    if (sessionKey) {
+        lastAssistantText = await getLastAssistantResponse(sessionKey);
+        if (lastAssistantText) {
+            console.log("[agents-memory] 📝 Captured assistant response:", lastAssistantText.slice(0, 50) + "...");
+        }
+    }
+    
     try {
         // Store one entry per user message (not batched)
         const userMessages = conversationHistory
             .filter(m => m.role === "user")
             .map(m => m.content);
         
+        const solution = lastAssistantText || "(AI response captured in session)";
+        
         console.log("[agents-memory] 📚 Storing", userMessages.length, "conversations");
         
         for (let i = 0; i < userMessages.length; i++) {
             await daemonCall("write", {
                 problem: userMessages[i].slice(0, 200),
-                solution: "(AI response captured in session)",
+                solution: solution.slice(0, 500),
                 type: "learning"
             });
             console.log("[agents-memory] ✅ Stored", i + 1, "/", userMessages.length, ":", userMessages[i].slice(0, 30));
@@ -409,7 +481,6 @@ async function sessionCompactAfter(event) {
         
         // Reset after write
         conversationHistory = [];
-        lastAssistantResponse = null;
         messageCountSinceCompact = 0;
         
     } catch (e) {
