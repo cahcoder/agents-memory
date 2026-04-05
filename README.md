@@ -25,7 +25,7 @@ AI CLI tools share a fatal flaw: **they forget everything between sessions**.
 │     ↓                        ↓                              │
 │  Query memory ──────────→  Store learning                  │
 │     ↓                        ↓                              │
-│  Inject context ────────→  Update patterns                 │
+│  Inject context ────────→  Update patterns                │
 │                                                             │
 │         Continuous Learning Loop                            │
 └─────────────────────────────────────────────────────────────┘
@@ -58,81 +58,41 @@ ANN Search  │ HNSW (ef_search=200, m=48)
 Similarity  │ Cosine similarity
 ```
 
-## Installation
-
-### Git Clone (Recommended)
+## Installation (Single-Shot)
 
 ```bash
-# Clone
-git clone git@github.com:cahcoder/agents-memory.git
-cd agents-memory
+# From local tgz (recommended for testing)
+npm install -g /path/to/agents-memory-1.1.1.tgz
 
-# Install globally from local path
-npm install -g .
-
-# Initialize (installs daemon + hook)
-agents-memory init
-```
-
-### npm (When Published)
-
-```bash
+# From npm (when published)
 npm install -g agents-memory
-agents-memory init
+
+# That's it! Postinstall handles:
+# ✅ Python dependencies
+# ✅ Daemon service (systemd)
+# ✅ OpenClaw hook installation
+# ✅ OpenClaw config auto-update
+# ✅ Gateway reload
 ```
+
+### What Gets Installed
+
+| Component | Location |
+|-----------|----------|
+| CLI | `~/.npm-global/bin/agents-memory` |
+| Python scripts | `~/.npm-global/lib/node_modules/agents-memory/scripts/` |
+| Hook handler | `~/.openclaw/hooks/agents-memory/` |
+| Memory data | `~/.memory/chroma/` |
+| Daemon | `~/.memory/agents-memory/daemon.sock` |
+| Service | `systemd --user agents-memory-daemon.service` |
 
 ---
 
-## Setup (Required After Install)
-
-### 1. Configure OpenClaw
-
-Edit `~/.openclaw/openclaw.json` — add these entries:
-
-```json
-{
-  "hooks": {
-    "internal": {
-      "entries": {
-        "agents-memory": { "enabled": true }
-      }
-    }
-  },
-  "plugins": {
-    "entries": {
-      "agents-memory": { "enabled": true }
-    }
-  }
-}
-```
-
-Then restart gateway:
-```bash
-nohup openclaw gateway restart > /dev/null 2>&1 &
-```
-
-### 2. Verify Hooks Loaded
-
-```bash
-openclaw hooks list
-```
-
-Should show `agents-memory` with events: `message:preprocessed`, `session:compact:after`
-
-### 3. Test Memory Pipeline
-
-Send a message to your bot — check logs:
-```bash
-tail -f /tmp/openclaw/openclaw-$(date +%Y-%m-%d).log | grep agents-memory
-```
-
----
-
-## Essential Commands
+## Commands
 
 | Command | Description |
 |---------|-------------|
-| `agents-memory init` | Initialize setup (daemon + hook) |
+| `agents-memory --version` | Check version |
 | `agents-memory search <query>` | Search memory |
 | `agents-memory write <problem> [solution]` | Store learning |
 | `agents-memory batch-write --json '[...]'` | Store multiple learnings |
@@ -157,7 +117,6 @@ agents-memory bootstrap myproject --architecture "FastAPI + PostgreSQL"
 
 # Run GC
 agents-memory gc --stats
-agents-memory gc --dedup
 ```
 
 ---
@@ -213,9 +172,9 @@ Score boost formula: `retrieval_boost = min(0.10, 0.01 * log1p(retrieval_count))
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  OpenClaw Gateway                                           │
+│  OpenClaw Gateway                                          │
 │                                                             │
-│  hooks/agents-memory/handler.js ← Managed hook             │
+│  ~/.openclaw/hooks/agents-memory/handler.js ← Managed hook │
 └─────────────────────────────────────────────────────────────┘
                               ↓ socket
 ┌─────────────────────────────────────────────────────────────┐
@@ -272,6 +231,24 @@ Score boost formula: `retrieval_boost = min(0.10, 0.01 * log1p(retrieval_count))
 
 ## Configuration
 
+Config file: `~/.openclaw/openclaw.json`
+
+The hook is automatically added during install:
+
+```json
+{
+  "hooks": {
+    "internal": {
+      "entries": {
+        "agents-memory": { "enabled": true }
+      }
+    }
+  }
+}
+```
+
+### Advanced Settings
+
 ```yaml
 # config/settings.yaml
 chroma:
@@ -310,36 +287,47 @@ gc:
 
 ---
 
+## Verify Installation
+
+Check that the hook is loaded:
+
+```bash
+openclaw hooks list
+```
+
+Should show `agents-memory` with events: `message:preprocessed`, `session:compact:after`
+
+### Check Logs
+
+```bash
+tail -f /tmp/openclaw/openclaw-$(date +%Y-%m-%d).log | grep agents-memory
+```
+
+---
+
 ## Cleanup / Reset
 
 ### Fresh reinstall (keep config, reset memory):
-
-```bash
-# Stop daemon
-systemctl --user stop agents-memory-daemon
-
-# Delete memory data
-rm -rf ~/.memory/chroma/
-rm -rf ~/.memory/agents-memory/
-
-# Restart daemon (will reinitialize)
-systemctl --user start agents-memory-daemon
-```
-
-### Complete uninstall:
 
 ```bash
 # Via CLI
 agents-memory uninstall
 
 # Or manual:
+# 1. systemctl --user stop agents-memory-daemon
+# 2. rm -rf ~/.memory/chroma/
+# 3. npm install -g /path/to/agents-memory-1.1.1.tgz
+```
+
+### Complete removal (everything):
+
+```bash
 # 1. systemctl --user stop agents-memory-daemon memory-gc.timer memory-trash.timer
-# 2. rm -rf ~/.memory/chroma/ ~/.memory/agents-memory/
-# 3. rm -rf ~/.openclaw/hooks/agents-memory/
-# 4. Edit ~/.openclaw/openclaw.json — remove:
-#    - hooks.internal.entries.agents-memory
-#    - plugins.entries.agents-memory
-# 5. npm rm -g agents-memory
+# 2. systemctl --user disable agents-memory-daemon memory-gc.timer memory-trash.timer
+# 3. rm -rf ~/.memory/chroma/ ~/.memory/agents-memory/
+# 4. rm -rf ~/.openclaw/hooks/agents-memory/
+# 5. Edit ~/.openclaw/openclaw.json — remove hooks.internal.entries.agents-memory
+# 6. npm rm -g agents-memory
 ```
 
 ---

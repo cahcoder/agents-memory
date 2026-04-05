@@ -7,11 +7,8 @@
  * What it does:
  * 1. Installs daemon systemd service (Type=forking + PIDFile)
  * 2. Installs OpenClaw managed hook at ~/.openclaw/hooks/agents-memory/
- * 3. Copies skill files to skill/ dir for CLI access
- * 
- * IMPORTANT: This installs a MANAGED HOOK, NOT a plugin.
- * - Plugins: ~/.openclaw/extensions/
- * - Managed hooks: ~/.openclaw/hooks/
+ * 3. Auto-configures OpenClaw to use the hook
+ * 4. Auto-reloads OpenClaw gateway
  */
 
 const { execSync } = require('child_process');
@@ -88,7 +85,7 @@ function installDaemon() {
   const DAEMON_SCRIPT = path.join(PKG, 'scripts', 'memory_daemon.py');
   const SERVICE_FILE = path.join(HOME, '.config', 'systemd', 'user', `${SERVICE_NAME}.service`);
 
-  console.log('\n[1/3] Installing daemon service...');
+  console.log('\n[1/4] Installing daemon service...');
   console.log(`  Package root: ${PKG}`);
   console.log(`  Daemon script: ${DAEMON_SCRIPT}`);
   console.log(`  Memory dir: ${MEMORY_DIR}`);
@@ -129,7 +126,7 @@ function installOpenClawHook() {
   const HOOK_SRC = path.join(PKG, 'hook-packs', 'agents-memory');
   const HOOK_SRC_LEGACY = path.join(PKG, 'hooks', 'agents-memory'); // fallback
 
-  console.log('\n[2/3] Installing OpenClaw managed hook...');
+  console.log('\n[2/4] Installing OpenClaw managed hook...');
   console.log(`  Source: ${HOOK_SRC}`);
 
   // Check if hook-packs exists
@@ -177,13 +174,91 @@ function installOpenClawHook() {
 }
 
 // ───────────────────────────────────────────────────────────────
+// AUTO-CONFIGURE OPENCLAW
+// ───────────────────────────────────────────────────────────────
+function installOpenClawConfig() {
+  console.log('\n[3/4] Configuring OpenClaw...');
+
+  // Ensure config structure
+  let config = {};
+  if (fs.existsSync(OPENCLAW_CONFIG)) {
+    try {
+      const content = fs.readFileSync(OPENCLAW_CONFIG, 'utf8');
+      config = JSON.parse(content);
+    } catch (e) {
+      console.log('  ⚠️  Could not parse existing openclaw.json - creating new');
+    }
+  }
+
+  // Ensure nested structure
+  if (!config.hooks) config.hooks = {};
+  if (!config.hooks.internal) config.hooks.internal = {};
+  if (!config.hooks.internal.entries) config.hooks.internal.entries = {};
+
+  // Add agents-memory hook entry (NOT in plugins!)
+  config.hooks.internal.entries['agents-memory'] = { enabled: true };
+
+  // Remove any stale plugin entries for agents-memory
+  if (config.plugins && config.plugins.entries && config.plugins.entries['agents-memory']) {
+    delete config.plugins.entries['agents-memory'];
+    console.log('  ℹ️  Removed stale plugins.entries.agents-memory (not a plugin)');
+  }
+
+  // Write updated config
+  try {
+    fs.writeFileSync(OPENCLAW_CONFIG, JSON.stringify(config, null, 2));
+    console.log('  ✅ Config updated: hooks.internal.entries.agents-memory');
+    return true;
+  } catch (e) {
+    console.log(`  ⚠️  Could not write openclaw.json: ${e.message}`);
+    console.log('  ℹ️  Manual config required - see below');
+    return false;
+  }
+}
+
+// ───────────────────────────────────────────────────────────────
+// RELOAD OPENCLAW GATEWAY
+// ───────────────────────────────────────────────────────────────
+function reloadOpenClaw() {
+  console.log('\n[4/4] Reloading OpenClaw gateway...');
+
+  try {
+    // Send SIGHUP to gateway for config reload
+    const pidResult = execSync('pgrep -f "openclaw-gateway" | head -1', { encoding: 'utf8' }).trim();
+    if (pidResult) {
+      process.kill(parseInt(pidResult), 'SIGHUP');
+      console.log('  ✅ Gateway reload signaled');
+      return true;
+    }
+  } catch (e) {
+    // Gateway might not be running, try restart
+  }
+
+  try {
+    execSync('systemctl --user restart openclaw-gateway.service', { stdio: 'pipe' });
+    console.log('  ✅ Gateway restarted via systemd');
+    return true;
+  } catch (e) {
+    try {
+      execSync('nohup openclaw gateway restart > /dev/null 2>&1 &', { stdio: 'pipe', shell: '/bin/bash' });
+      console.log('  ✅ Gateway restart initiated');
+      return true;
+    } catch (e2) {
+      console.log('  ⚠️  Could not reload gateway');
+      console.log('      Manual: nohup openclaw gateway restart > /dev/null 2>&1 &');
+      return false;
+    }
+  }
+}
+
+// ───────────────────────────────────────────────────────────────
 // COPY SKILL FILES
 // ───────────────────────────────────────────────────────────────
 function installSkill() {
   const PKG = getPackageRoot();
   const SKILL_DIR = path.join(PKG, 'skill');
 
-  console.log('\n[3/3] Verifying skill files...');
+  console.log('\n[?] Verifying skill files...');
 
   if (!fs.existsSync(SKILL_DIR)) {
     console.log('  ℹ️  No skill/ directory in package (optional)');
@@ -204,44 +279,45 @@ function main() {
 
   const daemonOk = installDaemon();
   const hookOk = installOpenClawHook();
+  const configOk = installOpenClawConfig();
   const skillOk = installSkill();
+
+  // Reload gateway if everything is good
+  let reloadOk = false;
+  if (daemonOk && hookOk && configOk) {
+    reloadOk = reloadOpenClaw();
+  }
 
   console.log('\n╔═══════════════════════════════════════════════════════════╗');
   console.log('║                 Installation Summary                     ║');
   console.log('╚═══════════════════════════════════════════════════════════╝');
   console.log(`  Daemon service:  ${daemonOk ? '✅ Installed' : '⚠️  Skipped'}`);
   console.log(`  OpenClaw hook:   ${hookOk ? '✅ Installed' : '⚠️  Skipped'}`);
-  console.log(`  Skill files:     ${skillOk ? '✅ Installed' : '⚠️  Skipped'}`);
+  console.log(`  OpenClaw config: ${configOk ? '✅ Updated' : '⚠️  Manual required'}`);
+  console.log(`  Gateway reload:  ${reloadOk ? '✅ Reloaded' : '⚠️  Manual required'}`);
+  console.log(`  Skill files:     ${skillOk ? '✅ Verified' : '⚠️  Skipped'}`);
 
-  if (daemonOk && hookOk) {
-    console.log('\n✅ Setup complete!');
-    console.log('\n╔═══════════════════════════════════════════════════════════╗');
-    console.log('║         MANUAL CONFIGURATION REQUIRED                   ║');
-    console.log('╚═══════════════════════════════════════════════════════════╝');
-    console.log('\n⚠️  You must add this to ~/.openclaw/openclaw.json:');
-    console.log('\n  1. Open: nano ~/.openclaw/openclaw.json');
-    console.log('\n  2. Add to "hooks.internal.entries":');
-    console.log(`
-     "agents-memory": {
-       "enabled": true
-     }
-  `);
-    console.log('\n  3. Add to "plugins.entries":');
-    console.log(`
-     "agents-memory": {
-       "enabled": true
-     }
-  `);
-    console.log('\n  4. (Optional) Remove legacy entries if present:');
-    console.log('     - hooks.internal.entries.session-memory');
-    console.log('     - hooks.internal.entries.semantic-memory');
-    console.log('     - plugins.installs.agents-memory');
-    console.log('\n  5. Restart OpenClaw gateway:');
-    console.log('     nohup openclaw gateway restart > /dev/null 2>&1 &');
-    console.log('\n  6. Verify hook is loaded:');
-    console.log('     openclaw hooks list');
-    console.log('\n  7. Test memory pipeline:');
-    console.log('     Send a message to your bot - hook should trigger');
+  if (daemonOk && hookOk && configOk && reloadOk) {
+    console.log('\n═══════════════════════════════════════════════════════════');
+    console.log('  ✅ Installation complete!');
+    console.log('  Hook is active - send a message to test.');
+    console.log('═══════════════════════════════════════════════════════════');
+  } else if (daemonOk && hookOk) {
+    console.log('\n═══════════════════════════════════════════════════════════');
+    console.log('  ⚠️  Setup partially complete.');
+    console.log('  If config was not auto-added, manually add to openclaw.json:');
+    console.log('');
+    console.log('  "hooks": {');
+    console.log('    "internal": {');
+    console.log('      "entries": {');
+    console.log('        "agents-memory": { "enabled": true }');
+    console.log('      }');
+    console.log('    }');
+    console.log('  }');
+    console.log('');
+    console.log('  Then restart gateway:');
+    console.log('  nohup openclaw gateway restart > /dev/null 2>&1 &');
+    console.log('═══════════════════════════════════════════════════════════');
   } else {
     console.log('\n⚠️  Installation incomplete.');
     if (!daemonOk) {
