@@ -39,19 +39,20 @@ AI CLI tools share a fatal flaw: **they forget everything between sessions**.
 | Feature | Description |
 |---------|-------------|
 | **Semantic Search** | HNSW/ANN vector search — finds context in 300K+ entries at O(log n) |
-| **Domain Collections** | Separate critical, core, plan, spec, tasks, casual, prompts, progress |
-| **Sample Templates** | Generic code patterns, not garbage copies |
+| **Collection Priority** | Results weighted by collection importance (critical > core > plan > spec) |
+| **LRU Cache** | Caches search results (100 entries, 30s TTL) |
+| **Query Optimization** | Stopword removal + smart truncation |
+| **Domain Collections** | Separate critical, core, plan, spec, important, tasks, casual, prompts, progress |
 | **Self-Improvement** | Detects repeated problems → suggests reusable skills |
-| **Baseline Enforcement** | Never start a project with empty memory |
-| **Universal** | Works via AGENTS.md + wrapper for any AI CLI |
+| **Garbage Collection** | Auto dedup, decay, trash old entries |
 
 ## Tech Stack
 
 ```
-Language     │ Python 3.x
+Language     │ Python 3.x + Node.js CLI
 Embedding   │ sentence-transformers / all-MiniLM-L6-v2 (384 dims)
 Vector DB   │ Chroma (embedded DuckDB, no daemon)
-ANN Search  │ HNSW (M=32-48, ef=200-300)
+ANN Search  │ HNSW (ef_search=200, m=48)
 Similarity  │ Cosine similarity
 ```
 
@@ -67,10 +68,7 @@ cd agents-memory
 # Install globally from local path
 npm install -g .
 
-# Verify
-agents-memory --help
-
-# Initialize (first time)
+# Initialize (installs daemon + hook)
 agents-memory init
 ```
 
@@ -78,110 +76,87 @@ agents-memory init
 
 ```bash
 npm install -g agents-memory
-```
-
-The npm package auto-installs Python dependencies on first use.
-
-### Python (Direct/Development)
-
-```bash
-# Clone
-git clone git@github.com:cahcoder/agents-memory.git
-cd agents-memory
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Or use the memory-wrapper script directly
-./scripts/memory-wrapper --help
-```
-
-### OpenClaw Managed Hook
-
-```bash
-# Via npm (recommended when published)
-npm install -g agents-memory
-
-# Initialize - installs daemon + OpenClaw hook
-node scripts/install-seamless.js
-
-# Or use CLI if supported
 agents-memory init
 ```
 
-For full OpenClaw integration guide, see [docs/OPENCLAW-INTEGRATION.md](docs/OPENCLAW-INTEGRATION.md).
+---
 
-## After Install (Required for AI CLI Tools)
+## Setup (Required After Install)
 
-After installing, you need to create an `AGENTS.md` file in your project directory. This tells AI CLI tools (Claude Code, Gemini CLI, OpenCode, etc.) to use semantic memory.
+### 1. Configure OpenClaw
 
-### For AI CLI Tools (Claude Code, Gemini CLI, OpenCode, Codex, Cursor, etc.)
+Edit `~/.openclaw/openclaw.json` — add these entries:
 
-**Create `AGENTS.md` in your project root:**
+```json
+{
+  "hooks": {
+    "internal": {
+      "entries": {
+        "agents-memory": { "enabled": true }
+      }
+    }
+  },
+  "plugins": {
+    "entries": {
+      "agents-memory": { "enabled": true }
+    }
+  }
+}
+```
+
+Then restart gateway:
+```bash
+nohup openclaw gateway restart > /dev/null 2>&1 &
+```
+
+### 2. Verify Hooks Loaded
 
 ```bash
-# In your project directory
-agents-memory init-project
-# OR manually:
-touch AGENTS.md
+openclaw hooks list
 ```
 
-**Copy this content into `AGENTS.md`:**
+Should show `agents-memory` with events: `message:preprocessed`, `session:compact:after`
 
-```markdown
-# Semantic Memory
+### 3. Test Memory Pipeline
 
-## Memory Setup
-- MEMORY_DIR: ~/.memory/chroma
-- SKILL_DIR: ~/.npm-global/lib/node_modules/agents-memory/skill
+Send a message to your bot — check logs:
+```bash
+tail -f /tmp/openclaw/openclaw-$(date +%Y-%m-%d).log | grep agents-memory
+```
 
-## PRE-LLM Hook (Before AI thinks)
-Before starting a task, query relevant memory:
-bash: agents-memory pre "{task description}"
-When results found, inject them into context.
-
-## POST-LLM Hook (After AI responds)
-After successful response, store new learnings:
-bash: agents-memory post "{problem solved}" "{solution}"
-Only store generic patterns, not specific values.
+---
 
 ## Essential Commands
-- agents-memory init          - Initialize setup
-- agents-memory search <query>  - Search memory
-- agents-memory write <problem> <solution> - Store learning
-- agents-memory bootstrap <project> - Init project memory
-- agents-memory gc             - Run garbage collection
-- agents-memory uninstall      - Complete uninstall
-```
 
-### For OpenClaw
-Skill auto-installed to `~/.openclaw/workspace/skills/agents-memory/`. No AGENTS.md needed.
+| Command | Description |
+|---------|-------------|
+| `agents-memory init` | Initialize setup (daemon + hook) |
+| `agents-memory search <query>` | Search memory |
+| `agents-memory write <problem> [solution]` | Store learning |
+| `agents-memory bootstrap <project>` | Init project memory |
+| `agents-memory gc` | Run garbage collection |
+| `agents-memory uninstall` | Complete uninstall |
 
 ---
 
 ## Quick Start
 
 ```bash
-# Install
-openclaw plugin install semantic-memory
+# Search memory
+agents-memory search "postgres restart"
 
-# Query memory (PRE-LLM hook)
-memory_search "postgres restart pattern"
-
-# Store learning (POST-LLM hook)
-memory_write "container postgres crash" \
-  --solution "docker restart {container}" \
-  --type solution
+# Store a learning
+agents-memory write "container postgres crash" "docker restart {container_name}"
 
 # Bootstrap new project
-memory_bootstrap myproject \
-  --architecture "FastAPI + PostgreSQL + Redis" \
-  --tech-stack "Python, Docker, K8s"
+agents-memory bootstrap myproject --architecture "FastAPI + PostgreSQL"
 
-# Garbage collection
-memory_gc --stats
-memory_gc --dedup
+# Run GC
+agents-memory gc --stats
+agents-memory gc --dedup
 ```
+
+---
 
 ## How It Works
 
@@ -190,12 +165,13 @@ memory_gc --dedup
 ```
 User: "restart postgres container"
     ↓
-memory_search("postgres restart")
+Hook fires: message:preprocessed
     ↓
-→ Chroma query (semantic, not keyword)
-→ Finds: "docker restart {container}"
+agents-memory searches Chroma
     ↓
-INJECT: "Remember: postgres restart pattern = docker restart {container}"
+→ Finds: "docker restart {container_name}"
+    ↓
+INJECT: Relevant context injected into AI prompt
     ↓
 AI processes WITH context
 ```
@@ -205,64 +181,58 @@ AI processes WITH context
 ```
 AI responds successfully
     ↓
-Analyze: Did AI learn something new?
+Session compaction occurs
     ↓
-If new pattern/solution found:
-  → Store to Chroma with metadata
-  → Update use_count
-  → Boost importance if used 3+ times
+Hook fires: session:compact:after
+    ↓
+Stores new learnings to Chroma
+    ↓
+Updates use_count, importance
 ```
 
-### 3. Self-Improvement
-
-```
-Same problem solved 3x manually
-    ↓
-System detects: "this pattern appears often"
-    ↓
-Suggests: "Store as generic template?"
-    ↓
-AI writes: docker restart {container_name}
-    ↓
-Next time: instant recall, no manual solve needed
-```
+---
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  AI CLI Tools (OpenClaw, Claude Code, Gemini CLI, etc.)    │
+│  OpenClaw Gateway                                           │
 │                                                             │
-│  AGENTS.md ── enforces ──→ Memory Pipeline                  │
+│  hooks/agents-memory/handler.js ← Managed hook             │
+└─────────────────────────────────────────────────────────────┘
+                              ↓ socket
+┌─────────────────────────────────────────────────────────────┐
+│  agents-memory-daemon (systemd service)                    │
+│                                                             │
+│  memory_daemon.py ← UNIX socket server                     │
+│  chroma_client.py ← ChromaDB client                        │
 └─────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────┐
-│  agents-memory                                         │
+│  Chroma Vector DB (~/.memory/chroma/)                      │
 │                                                             │
-│  skill/                                                     │
-│  ├── memory_search.py      ← Query Chroma                  │
-│  ├── memory_write.py       ← Store entries                  │
-│  ├── memory_pre_llm.py     ← Pre-LLM hook                 │
-│  ├── memory_post_llm.py    ← Post-LLM hook                │
-│  ├── memory_bootstrap.py    ← Project baseline             │
-│  └── memory_gc.py          ← Dedup, decay, archive         │
-└─────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────┐
-│  Chroma Vector DB                                            │
-│  ~/.memory/chroma/                                          │
-│                                                             │
-│  collections/                                               │
-│  ├── critical/    ← Never delete                           │
-│  ├── core/        ← System laws, design decisions          │
-│  ├── plan/        ← Project plans, roadmaps               │
-│  ├── spec/        ← Project specifications                │
-│  ├── tasks/       ← Solutions, skills                     │
-│  ├── casual/      ← Chat, preferences                      │
-│  ├── prompts/     ← Templates                              │
-│  └── progress/    ← Decisions, tracking                    │
+│  collections: critical, core, plan, spec, important,       │
+│              tasks, casual, prompts, progress              │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+---
+
+## Collections
+
+| Collection | TTL | Purpose |
+|------------|-----|---------|
+| critical | never | Critical, time-sensitive |
+| core | 5 years | System laws, design decisions |
+| plan | never | Project plans, roadmaps |
+| spec | never | Project specifications |
+| important | 2 years | Important but not critical |
+| tasks | on-complete | Solutions, skills, todos |
+| casual | 30 days | Chat, preferences |
+| prompts | 90 days | User prompts history |
+| progress | never | Resume tracker |
+
+---
 
 ## Entry Schema
 
@@ -273,7 +243,6 @@ Next time: instant recall, no manual solve needed
   "entry_type": "solution | skill | fact | decision | baseline | chat",
   "problem": "What problem does this solve?",
   "solution": "Generic template or answer",
-  "logic_solution": "Why/how it works",
   "language": "python | bash | sql | yaml | ...",
   "use_count": 0,
   "last_used": "ISO timestamp",
@@ -282,41 +251,7 @@ Next time: instant recall, no manual solve needed
 }
 ```
 
-## Sample Code Rule
-
-Store **generic templates**, NOT exact copies:
-
-```
-❌ BAD — garbage accumulation:
-   docker exec -it postgres_prod_001 pg_ctl restart...
-   docker exec -it postgres_backup_002 pg_ctl restart...
-   → 100 variations = garbage
-
-✅ GOOD — reusable pattern:
-   docker exec -it {container_name} pg_ctl restart -D {data_dir}
-   → 1 entry = reusable everywhere
-```
-
-## Universal Compatibility
-
-```
-OpenClaw    │ AGENTS.md hook (native)
-Claude Code │ AGENTS.md hook
-Gemini CLI  │ AGENTS.md hook
-OpenCode    │ AGENTS.md hook
-Codex       │ AGENTS.md hook
-Copilot     │ AGENTS.md hook
-```
-
-For non-OpenClaw tools:
-
-```bash
-# ~/.bashrc
-alias opencode='memory-wrapper opencode'
-alias gemini='memory-wrapper gemini'
-```
-
-Wrapper intercepts, runs Pre/Post hooks, calls actual CLI.
+---
 
 ## Configuration
 
@@ -327,15 +262,36 @@ chroma:
   embedding_model: "all-MiniLM-L6-v2"
   dimensions: 384
 
+collections:
+  default_importance: 0.5
+  priority:
+    critical: 0.30
+    core: 0.25
+    plan: 0.22
+    spec: 0.20
+    important: 0.15
+    progress: 0.12
+    tasks: 0.10
+    prompts: 0.05
+    casual: 0.00
+
+memory:
+  search:
+    max_query_length: 200
+    cache_ttl_seconds: 30
+    cache_max_entries: 100
+    hnsw:
+      ef_search: 200
+      ef_construction: 200
+      m: 48
+
 gc:
   dedup_interval_days: 7
   archive_after_days: 90
   trash_retention_days: 30
-
-memory:
-  max_preload_entries: 10
-  min_learning_confidence: 0.3
 ```
+
+---
 
 ## Cleanup / Reset
 
@@ -356,19 +312,20 @@ systemctl --user start agents-memory-daemon
 ### Complete uninstall:
 
 ```bash
-# Run uninstall script
-node /srv/apps/agents-memory/scripts/uninstall.js
+# Via CLI
+agents-memory uninstall
 
 # Or manual:
-# 1. Stop services: systemctl --user stop agents-memory-daemon memory-gc.timer memory-trash.timer
-# 2. Delete memory: rm -rf ~/.memory/chroma/ ~/.memory/agents-memory/
-# 3. Delete hooks: rm -rf ~/.openclaw/hooks/agents-memory/
-# 4. Edit openclaw.json - remove these entries:
+# 1. systemctl --user stop agents-memory-daemon memory-gc.timer memory-trash.timer
+# 2. rm -rf ~/.memory/chroma/ ~/.memory/agents-memory/
+# 3. rm -rf ~/.openclaw/hooks/agents-memory/
+# 4. Edit ~/.openclaw/openclaw.json — remove:
 #    - hooks.internal.entries.agents-memory
 #    - plugins.entries.agents-memory
-#    - plugins.installs.agents-memory
-# 5. Restart gateway: nohup openclaw gateway restart > /dev/null 2>&1 &
+# 5. npm rm -g agents-memory
 ```
+
+---
 
 ## License
 
