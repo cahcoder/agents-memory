@@ -214,12 +214,20 @@ def _search_single_collection(args):
     return results
 
 
-def search_memory(query, project=None, entry_type=None, limit=5):
-    """Search across all collections in PARALLEL using ThreadPoolExecutor."""
+def search_memory(query, project=None, entry_type=None, limit=5, collection=None):
+    """Search across all collections in PARALLEL using ThreadPoolExecutor.
+    
+    Args:
+        query: Search query text
+        project: Filter by project name
+        entry_type: Filter by entry type (solution/skill/fact/decision/baseline/chat/prompt)
+        limit: Maximum results to return
+        collection: If specified, search only this collection (string). Otherwise search all.
+    """
     client = get_chroma_client()
     ef = get_embedding_function()
 
-    collections_to_query = list(COLLECTIONS)
+    collections_to_query = [collection] if collection else list(COLLECTIONS)
 
     where = {}
     if project:
@@ -235,8 +243,9 @@ def search_memory(query, project=None, entry_type=None, limit=5):
 
     all_results = []
 
-    # Parallel search across all collections
-    with ThreadPoolExecutor(max_workers=min(len(collections_to_query), 4)) as executor:
+    # Parallel search across collections
+    max_workers = 1 if collection else min(len(collections_to_query), 4)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(_search_single_collection, arg): arg[0] for arg in worker_args}
         for future in as_completed(futures):
             try:

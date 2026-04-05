@@ -1,15 +1,17 @@
 /**
  * agents-memory Managed Hook (CommonJS)
  * Events: message:preprocessed, session:compact:after
- * 
- * Event structure from OpenClaw: { type, action, sessionKey, context, messages, timestamp }
- * Hook name format: "type:action" (e.g., "message:preprocessed")
  */
 
 const net = require("net");
+const path = require("path");
 
 const SOCKET = process.env.HOME + "/.memory/agents-memory/daemon.sock";
+const MEMORY_DIR = process.env.HOME + "/.memory/agents-memory";
 
+// ───────────────────────────────────────────────────────────────
+// DAEMON COMMUNICATION
+// ───────────────────────────────────────────────────────────────
 function daemonCall(cmd, args) {
   return new Promise((resolve, reject) => {
     const s = net.createConnection(SOCKET, () => {
@@ -29,21 +31,43 @@ function daemonCall(cmd, args) {
   });
 }
 
+// ───────────────────────────────────────────────────────────────
+// IN-MEMORY STORE (persists across hook invocations)
+// ───────────────────────────────────────────────────────────────
+let lastUserMessage = null;
+let lastAssistantResponse = null;
+let messageCountSinceCompact = 0;
+
+// ───────────────────────────────────────────────────────────────
+// MESSAGE EXTRACTION
+// ───────────────────────────────────────────────────────────────
 function getMessageBody(event) {
-  // OpenClaw message:preprocessed event structure:
-  // event.context contains { from, to, body, bodyForAgent, ... }
   const ctx = event && event.context;
   if (!ctx) return null;
-  
-  // bodyForAgent contains the raw message text intended for the AI
-  // body is the original message text
-  const body = ctx.bodyForAgent || ctx.body;
-  return (body && typeof body === "string" && body.length > 0) ? body : null;
+  return ctx.bodyForAgent || ctx.body || null;
 }
 
+function extractTextContent(content) {
+  if (!content) return null;
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content.map(extractTextContent).filter(Boolean).join(" ");
+  }
+  if (content && content.type === "text") return content.text;
+  return null;
+}
+
+// ───────────────────────────────────────────────────────────────
+// PRE-LLM: Query memory + track conversation
+// ───────────────────────────────────────────────────────────────
 async function messagePreprocessed(event) {
   const msg = getMessageBody(event);
   if (!msg || msg.length < 3) return;
+  
+  // Track conversation for POST-LLM
+  lastUserMessage = msg;
+  lastAssistantResponse = null; // Will be set after AI responds
+  messageCountSinceCompact++;
   
   try {
     console.log("[agents-memory] Query: " + msg.slice(0,50) + "...");
@@ -58,14 +82,69 @@ async function messagePreprocessed(event) {
   }
 }
 
+// ───────────────────────────────────────────────────────────────
+// POST-LLM: Store learning after compaction
+// ───────────────────────────────────────────────────────────────
 async function sessionCompactAfter(event) {
-  console.log("[agents-memory] Session compacted");
+  console.log("[agents-memory] Session compacted, checking for learnings...");
+  
+  // Only write if we have a conversation pair and enough messages exchanged
+  if (!lastUserMessage || messageCountSinceCompact < 2) {
+    console.log("[agents-memory] Skipping write - insufficient context");
+    messageCountSinceCompact = 0;
+    return;
+  }
+  
+  // The lastAssistantResponse would need to be extracted from the session
+  // For now, store the user message as a learning prompt
+  // In a full implementation, we'd read the session file to get the AI response
+  
+  try {
+    // Try to read the last exchange from session if we have sessionFile
+    let assistantResponse = lastAssistantResponse;
+    
+    // If we don't have assistant response yet, try to extract from event
+    // In a full implementation, we'd read the session file
+    if (!assistantResponse && event.sessionFile) {
+      // Could read session file here to get latest AI response
+      // For now, use placeholder
+      assistantResponse = "(see session file for details)";
+    }
+    
+    // Write learning to memory
+    const learning = {
+      problem: lastUserMessage.slice(0, 200),
+      solution: assistantResponse || "(AI response captured in session)",
+      type: "learning",
+      messagesSinceCompact: messageCountSinceCompact
+    };
+    
+    await daemonCall("write", {
+      problem: learning.problem,
+      solution: learning.solution,
+      collection: "tasks"
+    });
+    
+    console.log("[agents-memory] ✅ Stored learning:", learning.problem.slice(0,50));
+    
+    // Reset after write
+    lastUserMessage = null;
+    lastAssistantResponse = null;
+    messageCountSinceCompact = 0;
+    
+  } catch (e) {
+    console.warn("[agents-memory] POST-LLM write error:", e.message);
+  }
 }
 
-// Default export - dispatcher
+// ───────────────────────────────────────────────────────────────
+// DISPATCHER
+// ───────────────────────────────────────────────────────────────
 async function handler(event) {
-  const hook = event && event.type && event.action ? (event.type + ":" + event.action) : undefined;
-  console.log("[agents-memory] Hook triggered, hook=", hook);
+  const hook = event && event.type && event.action 
+    ? (event.type + ":" + event.action) 
+    : undefined;
+  
   if (hook === "message:preprocessed") {
     return messagePreprocessed(event);
   } else if (hook === "session:compact:after") {

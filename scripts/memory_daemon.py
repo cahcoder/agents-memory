@@ -82,7 +82,8 @@ def handle_search(args):
         query=args.get("query", ""),
         project=args.get("project"),
         entry_type=args.get("entry_type"),
-        limit=args.get("limit", 5)
+        limit=args.get("limit", 5),
+        collection=args.get("collection")
     )
 
 
