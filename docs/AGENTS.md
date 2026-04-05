@@ -68,18 +68,56 @@ python3 $SKILL_DIR/scripts/intelligence.py velocity
 | `skill` | Reusable techniques |
 | `fact` | Factual knowledge |
 | `decision` | Architecture choices |
+| `learning` | Post-LLM conversation learnings |
 | `baseline` | Project starting knowledge |
 
 ---
 
-## Collections
+## Collection Tree
 
-- `critical/` — Never delete
-- `core/` — Core knowledge
-- `tasks/` — Task solutions
-- `casual/` — Conversations
-- `prompts/` — Templates
-- `progress/` — Tracking
+| Collection | Purpose | Auto-Delete | Priority |
+|------------|---------|-------------|----------|
+| `critical/` | Never delete, time-sensitive | ❌ | 0.30 |
+| `core/` | Core facts, decisions | ❌ | 0.25 |
+| `plan/` | Planning, architecture | ❌ | 0.22 |
+| `spec/` | Specifications | ❌ | 0.20 |
+| `important/` | Important but not critical | ❌ | 0.15 |
+| `progress/` | Resume tracker (never delete) | ❌ | 0.12 |
+| `tasks/` | Task solutions, TODOs | ✅ on-done | 0.10 |
+| `prompts/` | User prompts history | ✅ 90 days | 0.05 |
+| `casual/` | Conversations, brief mentions | ✅ 30 days | 0.00 |
+
+---
+
+## What Gets Stored
+
+**Pre-LLM (automatic):**
+- Relevant memories from past conversations
+- Project-specific knowledge
+- Previous decisions and solutions
+
+**Post-LLM (automatic):**
+- Conversation learnings after compaction
+- Problem → solution pairs
+- User preferences (if captured)
+
+**Manual Storage:**
+- User asks to "remember this"
+- Development fixes and root causes
+- AI rules and constraints
+
+---
+
+## Memory Architecture
+
+```
+.memory/
+├── agents-memory/
+│   ├── daemon.sock    # IPC socket
+│   ├── daemon.pid     # Process ID
+│   └── chroma.sqlite3 # Vector database
+└── chroma/            # Legacy (deprecated)
+```
 
 ---
 

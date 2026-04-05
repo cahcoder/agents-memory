@@ -745,6 +745,31 @@ Only store generic patterns, not specific values.
 - \`agents-memory search <query>\`  - Search memory
 - \`agents-memory write <problem> <solution>\` - Store learning
 - \`agents-memory bootstrap <project>\` - Init project memory
+
+### Collection Tree
+
+| Collection | Purpose | Auto-Delete | Priority |
+|------------|---------|-------------|----------|
+| \`critical/\` | Never delete, time-sensitive | ❌ | 0.30 |
+| \`core/\` | Core facts, decisions | ❌ | 0.25 |
+| \`plan/\` | Planning, architecture | ❌ | 0.22 |
+| \`spec/\` | Specifications | ❌ | 0.20 |
+| \`important/\` | Important but not critical | ❌ | 0.15 |
+| \`progress/\` | Resume tracker (never delete) | ❌ | 0.12 |
+| \`tasks/\` | Task solutions, TODOs | ✅ on-done | 0.10 |
+| \`prompts/\` | User prompts history | ✅ 90 days | 0.05 |
+| \`casual/\` | Conversations, brief mentions | ✅ 30 days | 0.00 |
+
+### Entry Types
+
+| Type | Use For |
+|------|---------|
+| \`solution\` | Problem → solution pairs |
+| \`skill\` | Reusable techniques |
+| \`fact\` | Factual knowledge |
+| \`decision\` | Architecture choices |
+| \`learning\` | Post-LLM conversation learnings |
+| \`baseline\` | Project starting knowledge |
 `;
 
     // ── AGENTS.md (CLI tools) ─────────────────────────────────
@@ -782,6 +807,48 @@ Only store generic patterns, not specific values.
 
 **When user asks to store something:**
 Use \`agents-memory write\` to persist learnings.
+
+### Collection Tree
+
+| Collection | Purpose | Auto-Delete | Priority |
+|------------|---------|-------------|----------|
+| \`critical/\` | Never delete, time-sensitive | ❌ | 0.30 |
+| \`core/\` | Core facts, decisions | ❌ | 0.25 |
+| \`plan/\` | Planning, architecture | ❌ | 0.22 |
+| \`spec/\` | Specifications | ❌ | 0.20 |
+| \`important/\` | Important but not critical | ❌ | 0.15 |
+| \`progress/\` | Resume tracker (never delete) | ❌ | 0.12 |
+| \`tasks/\` | Task solutions, TODOs | ✅ on-done | 0.10 |
+| \`prompts/\` | User prompts history | ✅ 90 days | 0.05 |
+| \`casual/\` | Conversations, brief mentions | ✅ 30 days | 0.00 |
+
+### Entry Types
+
+| Type | Use For |
+|------|---------|
+| \`solution\` | Problem → solution pairs |
+| \`skill\` | Reusable techniques |
+| \`fact\` | Factual knowledge |
+| \`decision\` | Architecture choices |
+| \`learning\` | Post-LLM conversation learnings |
+| \`baseline\` | Project starting knowledge |
+
+### What Gets Stored
+
+**Pre-LLM (automatic):**
+- Relevant memories from past conversations
+- Project-specific knowledge
+- Previous decisions and solutions
+
+**Post-LLM (automatic):**
+- Conversation learnings after compaction
+- Problem → solution pairs
+- User preferences (if captured)
+
+**Manual Storage:**
+- User asks to "remember this"
+- Development fixes and root causes
+- AI rules and constraints
 `;
       if (toolsContent.includes('## agents-memory')) {
         console.log(chalk.yellow('TOOLS.md already has agents-memory section'));
