@@ -8,6 +8,46 @@ Semantic memory system that grows smarter over time. Prevents context overflow a
 
 ---
 
+
+## Case Study: AI Forgetting Context
+
+**Scenario:** AI processes a task in session A, then in session B doesn't remember decisions made.
+
+```
+Session A:
+AI: "/srv is a restricted folder — I cannot access it"
+    ↓
+[Session ends, context lost]
+    ↓
+Session B:
+User: "what were we working on?"
+AI: [no memory of session A]
+```
+
+**With agents-memory:**
+
+```
+Session A:
+AI: "/srv is a restricted folder"
+    ↓
+Post-LLM stores to memory
+    ↓
+[Session ends]
+    ↓
+Session B:
+User: "what were we working on?"
+    ↓
+Pre-LLM searches memory
+    ↓
+→ Finds session A context
+    ↓
+INJECT: AI sees previous decisions
+    ↓
+AI: "In session A, we confirmed /srv is restricted..."
+```
+
+The `laws` collection ensures **critical rules are NEVER forgotten** — they're always injected, even for unrelated prompts.
+
 ## The Problem
 
 AI CLI tools share a fatal flaw: **they forget everything between sessions**.
@@ -194,12 +234,84 @@ Score boost formula: `retrieval_boost = min(0.10, 0.01 * log1p(retrieval_count))
 
 ---
 
+
+## Laws Collection — Unconditional Rules
+
+The `laws` collection stores **hard rules that AI must ALWAYS follow**, regardless of prompt content.
+
+| Feature | Behavior |
+|---------|----------|
+| **Injection** | ALWAYS injected on every message (no keyword matching) |
+| **Use case** | Critical constraints: "/srv forbidden", "never delete without asking", etc. |
+| **TTL** | Never auto-deleted |
+| **Example** | `/srv is a restricted folder — never access` |
+
+### How It Works
+
+```
+User: "hello"  ← unrelated prompt
+    ↓
+Hook queries laws collection with dummy query
+    ↓
+→ Finds: "/srv is forbidden" rule
+    ↓
+INJECT: Laws + keyword results combined
+    ↓
+AI sees: laws first, then relevant context
+```
+
+### Adding Laws
+
+```bash
+python3 ~/.npm-global/lib/node_modules/agents-memory/scripts/memory_daemon.py << 'PYEOF'
+import socket, json
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.connect('/home/developer/.memory/agents-memory/daemon.sock')
+sock.sendall(json.dumps({
+    'cmd': 'write',
+    'args': {
+        'problem': 'Your law here',
+        'solution': 'What AI should do',
+        'type': 'law'
+    }
+}).encode())
+print(sock.recv(1024).decode())
+sock.close()
+PYEOF
+```
+
+### Querying Laws
+
+```bash
+# Get all laws (no limit)
+LAWS_LIMIT=0 agents-memory search "any query"
+
+# Or via socket directly
+python3 ~/.npm-global/lib/node_modules/agents-memory/scripts/memory_daemon.py << 'PYEOF'
+import socket, json
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.connect('/home/developer/.memory/agents-memory/daemon.sock')
+sock.sendall(json.dumps({
+    'cmd': 'search',
+    'args': {'query': 'LAWS', 'collection': 'laws', 'limit': 50}
+}).encode())
+resp = sock.recv(65536)
+data = json.loads(resp.decode())
+for r in data['data']['data']:
+    print(r['content'])
+sock.close()
+PYEOF
+```
+
+---
+
 ## Collections
 
 | Collection | TTL | Purpose |
 |------------|-----|---------|
-| critical | never | Critical, time-sensitive |
-| core | 5 years | System laws, design decisions |
+| **laws** | **never** | **Hard rules — ALWAYS injected on every message** |
+| critical | never | Critical, time-sensitive alerts |
+| core | 5 years | Core facts, design decisions |
 | plan | never | Project plans, roadmaps |
 | spec | never | Project specifications |
 | important | 2 years | Important but not critical |
@@ -216,7 +328,7 @@ Score boost formula: `retrieval_boost = min(0.10, 0.01 * log1p(retrieval_count))
 {
   "id": "uuid-v4",
   "project": "project_name",
-  "entry_type": "solution | skill | fact | decision | baseline | chat",
+  "entry_type": "solution | skill | fact | decision | baseline | chat | law",
   "problem": "What problem does this solve?",
   "solution": "Generic template or answer",
   "language": "python | bash | sql | yaml | ...",
