@@ -624,3 +624,103 @@ Or use:
 systemctl --user restart openclaw-gateway.service
 ```
 
+---
+
+## Auto-Save with AI Response Pairing (2026-04-06)
+
+**Problem:** Original auto-save only saved user messages. AI responses were lost.
+
+**Solution:** Message pairing + stale cleanup via systemd timer.
+
+### Flow
+
+```
+User sends Message A
+       ↓
+Hook fires (message:preprocessed)
+       ↓
+1. pending[A] = {msg: "Message A", saved: false}
+       ↓
+AI generates response
+       ↓
+User sends Message B
+       ↓
+Hook fires
+       ↓
+2. Check pending[A] → saved: false
+       ↓
+3. Read AI response for Message A from session file
+       ↓
+4. Save: pending[A].msg + AI response → working collection
+       ↓
+5. pending[A].saved = true, DELETE
+       ↓
+6. pending[B] = {msg: "Message B", saved: false}
+```
+
+### Stale Cleanup (Systemd Timer)
+
+If user goes inactive after Message A, pending[A] never gets paired.
+
+**Solution:** Systemd timer runs every 1 minute:
+
+```
+Timer fires (every 1 minute)
+       ↓
+Read pending.json
+       ↓
+Check pending entries > 2 minutes old
+       ↓
+For each stale pending:
+  - Read last AI response from session file
+  - Save to working collection
+  - Mark pending.saved = true
+```
+
+**Files:**
+- Timer: `~/.config/systemd/user/agents-memory-stale-cleanup.timer`
+- Service: `~/.config/systemd/user/agents-memory-stale-cleanup.service`
+- Script: `~/.openclaw/scripts/cleanup-stale-pending.sh`
+- Pending: `~/.memory/agents-memory/pending.json`
+
+### Race Condition Protection
+
+**Problem:** Timer and hook could both try to save same pending.
+
+**Solution:** `saved` flag prevents duplicate saves:
+
+```javascript
+// Before saving
+if (pending.saved) {
+    continue;  // Skip already saved
+}
+
+// After saving
+pending.saved = true;
+pendingUserMessages.delete(key);
+savePendingToFile();  // Persist to disk
+```
+
+### OpenClaw Event Structure
+
+The hook reads from `event.context.bodyForAgent` (NOT `event.messages`):
+
+```javascript
+event.messages = []  // EMPTY - dont use
+event.context.bodyForAgent = "[Mon 2026-04-06 21:48 GMT+7] message"  // USE THIS
+event.context.body = "message"  // raw without prefix
+event.context.sessionKey = "agent:main:main"
+```
+
+---
+
+## Summary of Latest Changes (2026-04-06)
+
+| Feature | Status | Description |
+|---------|--------|-------------|
+| Message pairing | ✅ | User + AI response saved together |
+| Stale cleanup | ✅ | Systemd timer cleans up inactive sessions |
+| Race protection | ✅ | `saved` flag prevents duplicates |
+| Event structure | ✅ | Uses `event.context.bodyForAgent` |
+| Pending persistence | ✅ | Saved to `pending.json` for timer access |
+

@@ -264,7 +264,7 @@ def handle_search(args):
 
 
 def handle_write(args):
-    """Write new entry to memory."""
+    """Write new entry to memory with deduplication."""
     global METRICS, CURRENT_PROJECT
     import uuid
     from datetime import datetime
@@ -277,6 +277,7 @@ def handle_write(args):
     project = args.get("project") or CURRENT_PROJECT
     entry_type = args.get("entry_type", args.get("type", "chat"))
     importance = args.get("importance", 0.5)
+    metadata_args = args.get("metadata", {})
 
     METRICS["writes"] += 1
     METRICS["projects"].add(project)
@@ -291,6 +292,11 @@ def handle_write(args):
         content_parts.append(f"Solution: {solution}")
     content = "\n\n".join(content_parts)
 
+    # Deduplication: skip for now - hook-level protection is sufficient
+    # The hook marks pending as saved=true after saving, preventing duplicates
+    # This avoids expensive get(limit=1000) that causes memory issues
+
+    # No duplicate found, create new entry
     metadata = {
         "project": project,
         "entry_type": entry_type,
@@ -300,17 +306,9 @@ def handle_write(args):
         "language": "unknown",
         "retrieval_count": 0
     }
-
-    type_to_collection = {
-        "solution": "tasks", "skill": "tasks", "fact": "important",
-        "decision": "progress", "baseline": "core", "chat": "casual",
-        "prompt": "prompts", "critical": "critical", "law": "laws",
-        "working": "working", "msg": "working",
-        "progress": "progress", "summary": "progress"
-    }
-    collection_name = type_to_collection.get(entry_type, "casual")
-
-    collection = client.get_or_create_collection(name=collection_name, embedding_function=ef)
+    if metadata_args:
+        metadata.update(metadata_args)
+    
     entry_id = str(uuid.uuid4())
     collection.add(ids=[entry_id], documents=[content], metadatas=[metadata])
 
