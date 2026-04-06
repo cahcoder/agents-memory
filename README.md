@@ -451,3 +451,89 @@ MIT License — See [LICENSE](LICENSE)
 ---
 
 *"Grows the Longer It Runs"*
+
+---
+
+## Working Collection — Active Conversations
+
+The `working` collection stores **message pairs** (user + AI) to track active conversations, with topic-based summarization on compaction.
+
+| Field | Description |
+|-------|-------------|
+| `topic_id` | Session ID or auto-generated topic ID |
+| `messages` | Array of conversation turns |
+| `summary` | AI-generated summary (post-compaction) |
+| `msg_count` | Number of messages in this topic |
+| `last_updated` | Timestamp of last update |
+
+### Flow
+
+```
+Phase 1: Continuous Insert (per message)
+User: "ok proceed" → AI response
+    ↓ Insert to working[topic_id] (msg_count + 1)
+User: "then test" → AI response
+    ↓ Insert to working[topic_id] (msg_count + 2)
+...
+
+Phase 2: Compaction (when threshold reached)
+working[topic_id] has 5 entries
+    ↓ Trigger: "Should I compact?"
+    ↓ AI generates summary
+    ↓ DELETE 5 entries
+    ↓ INSERT 1 summarized entry
+    ↓ msg_count resets to 0
+
+Phase 3: Resume (new session with same topic)
+User: "continue production fix"
+    ↓ Search working collection
+    ↓ Find summarized entry
+    ↓ Inject: "Previous: production daemon fix discussion"
+    ↓ AI continues from checkpoint
+```
+
+### Adding Entries (Automatic)
+
+Every user message + AI response is automatically stored in `working` collection. No manual action needed.
+
+### Compaction (AI-Driven)
+
+When `msg_count` reaches threshold (default: 5), the hook injects an explicit task to consolidate memory.
+
+**Injected message:**
+```
+[memory: 5 messages logged in 'working' collection for session {session_id}. Threshold: 5. Consider requesting memory consolidation.]
+```
+
+**AI generates summary** (natural language response):
+```
+Based on the following conversation messages, provide a concise summary:
+
+{Topic} - Progress
+- What we've done: [bullet points]
+- What's next: [bullet points]
+
+Format: "{Topic} - Progress" followed by bullet points.
+```
+
+**Hook detects "MEMORY CONSOLIDATED"** in AI response → compaction executes:
+1. Retrieve all messages from `working` collection for session_id
+2. Delete old entries
+3. Insert new summarized entry
+4. Reset `msg_count` to 0
+
+### Usage
+
+```bash
+# View working entries
+memory init <topic_id>
+
+# Trigger compaction manually
+# AI will see threshold message and summarize automatically
+
+# Search working with session filter
+memory search "your query" --project "topic_id"
+```
+
+---
+

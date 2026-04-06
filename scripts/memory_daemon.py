@@ -304,7 +304,7 @@ def handle_write(args):
     type_to_collection = {
         "solution": "tasks", "skill": "tasks", "fact": "important",
         "decision": "progress", "baseline": "core", "chat": "casual",
-        "prompt": "prompts", "critical": "critical", "law": "laws"
+        "prompt": "prompts", "critical": "critical", "law": "laws", "working": "working", "msg": "working"
     }
     collection_name = type_to_collection.get(entry_type, "casual")
 

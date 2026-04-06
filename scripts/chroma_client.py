@@ -19,7 +19,7 @@ _client = None
 _ef = None
 
 # Collection definitions (shared across modules)
-COLLECTIONS = ["laws", "critical", "core", "plan", "spec", "important", "tasks", "casual", "prompts", "progress"]
+COLLECTIONS = ["laws", "working", "critical", "core", "plan", "spec", "important", "tasks", "casual", "prompts", "progress"]
 
 # Collection priority weights (boost applied during scoring)
 COLLECTION_PRIORITY = {
