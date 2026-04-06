@@ -304,7 +304,9 @@ def handle_write(args):
     type_to_collection = {
         "solution": "tasks", "skill": "tasks", "fact": "important",
         "decision": "progress", "baseline": "core", "chat": "casual",
-        "prompt": "prompts", "critical": "critical", "law": "laws", "working": "working", "msg": "working"
+        "prompt": "prompts", "critical": "critical", "law": "laws",
+        "working": "working", "msg": "working",
+        "progress": "progress", "summary": "progress"
     }
     collection_name = type_to_collection.get(entry_type, "casual")
 
@@ -342,7 +344,9 @@ def handle_batch_write(args):
     type_to_collection = {
         "solution": "tasks", "skill": "tasks", "fact": "important",
         "decision": "progress", "baseline": "core", "chat": "casual",
-        "prompt": "prompts", "critical": "critical"
+        "prompt": "prompts", "critical": "critical",
+        "working": "working", "msg": "working",
+        "progress": "progress", "summary": "progress"
     }
 
     results = []
@@ -465,6 +469,43 @@ def handle_reset_metrics(args):
     return {"status": "metrics_reset"}
 
 
+
+def handle_delete(args):
+    """Delete entries from a collection by filter."""
+    client = get_chroma_client()
+    ef = get_embedding_function()
+    
+    collection_name = args.get("collection", "working")
+    filter_dict = args.get("filter", {})
+    
+    try:
+        collection = client.get_collection(name=collection_name, embedding_function=ef)
+    except Exception:
+        return {"status": "collection_not_found", "collection": collection_name}
+    
+    # Get all entries and filter manually
+    all_data = collection.get()
+    ids_to_delete = []
+    
+    for i, entry_id in enumerate(all_data.get("ids", [])):
+        metadata = all_data.get("metadatas", [{}])[i] if i < len(all_data.get("metadatas", [])) else {}
+        
+        match = True
+        for key, value in filter_dict.items():
+            if metadata.get(key) != value:
+                match = False
+                break
+        
+        if match:
+            ids_to_delete.append(entry_id)
+    
+    if ids_to_delete:
+        collection.delete(ids=ids_to_delete)
+        log.info("Deleted %d entries from %s", len(ids_to_delete), collection_name)
+    
+    return {"status": "deleted", "count": len(ids_to_delete), "collection": collection_name}
+
+
 def handle_client(conn):
     """Handle a single client connection with timeout."""
     try:
@@ -506,6 +547,8 @@ def handle_client(conn):
                 result = {"ok": True, "data": handle_reset_metrics(args)}
             elif cmd == "ping":
                 result = {"ok": True, "data": "pong"}
+            elif cmd == "delete":
+                result = {"ok": True, "data": handle_delete(args)}
             else:
                 result = {"ok": False, "error": f"Unknown command: {cmd}"}
         except Exception as e:
