@@ -73,6 +73,7 @@ ExecStart=/usr/bin/python3 ${daemonScript} --daemon
 ExecStop=/bin/kill -TERM $MAINPID
 Environment="AGENTS_MEMORY_RUNTIME_DIR=${MEMORY_DIR}"
 Environment="PYTHONPATH=${getPackageRoot()}/scripts"
+Environment="AGENTS_MEMORY_PRODUCTION=1"
 Restart=always
 RestartSec=5
 

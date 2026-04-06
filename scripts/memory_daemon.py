@@ -31,7 +31,14 @@ from chroma_client import (
 )
 from logger import get_logger
 
+# Production mode: set AGENTS_MEMORY_PRODUCTION=1 to suppress debug/info logs
+PRODUCTION = os.environ.get("AGENTS_MEMORY_PRODUCTION", "").lower() in ("1", "true", "yes")
+
 log = get_logger("memory-daemon")
+
+# Suppress debug logs in production mode
+if PRODUCTION:
+    log.setLevel(logging.WARNING)
 
 RUNTIME_DIR = os.environ.get("AGENTS_MEMORY_RUNTIME_DIR", os.path.join(os.environ.get("HOME", "/home/" + os.environ.get("USER", "developer")), ".memory", "agents-memory"))
 PID_FILE = os.path.join(RUNTIME_DIR, "daemon.pid")
@@ -78,6 +85,24 @@ def signal_handler(sig, frame):
     log.info("Received signal %s, shutting down", sig)
     cleanup()
     sys.exit(0)
+
+
+def reload_handler(sig, frame):
+    """SIGHUP handler: flush caches and reload (graceful reload without restart)."""
+    global query_cache, METRICS
+    
+    log.info("Received SIGHUP, flushing caches...")
+    
+    # Flush query cache
+    flushed = len(query_cache)
+    query_cache.clear()
+    
+    # Optionally reset metrics (uncomment to reset on SIGHUP)
+    # METRICS = {"searches": 0, "searches_with_results": 0, "writes": 0,
+    #            "writes_rejected": 0, "writes_updated": 0,
+    #            "cache_hits": 0, "cache_misses": 0, "projects": set()}
+    
+    log.info(f"Caches flushed ({flushed} entries cleared)")
 
 
 def daemonize():
@@ -279,7 +304,7 @@ def handle_write(args):
     type_to_collection = {
         "solution": "tasks", "skill": "tasks", "fact": "important",
         "decision": "progress", "baseline": "core", "chat": "casual",
-        "prompt": "prompts"
+        "prompt": "prompts", "critical": "critical"
     }
     collection_name = type_to_collection.get(entry_type, "casual")
 
@@ -317,7 +342,7 @@ def handle_batch_write(args):
     type_to_collection = {
         "solution": "tasks", "skill": "tasks", "fact": "important",
         "decision": "progress", "baseline": "core", "chat": "casual",
-        "prompt": "prompts"
+        "prompt": "prompts", "critical": "critical"
     }
 
     results = []
@@ -532,6 +557,7 @@ def run_daemon():
 
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGHUP, reload_handler)
 
     # Accept loop
     while True:
