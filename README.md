@@ -626,36 +626,92 @@ systemctl --user restart openclaw-gateway.service
 
 ---
 
-## Auto-Save with AI Response Pairing (2026-04-06)
+## Auto-Save with AI Response Pairing (2026-04-07)
 
-**Problem:** Original auto-save only saved user messages. AI responses were lost.
-
-**Solution:** Message pairing + stale cleanup via systemd timer.
-
-### Flow
+### Complete Pipeline Flow
 
 ```
-User sends Message A
+USER SENDS MESSAGE
        ↓
-Hook fires (message:preprocessed)
+┌─────────────────────────────────────┐
+│  PRE-LLM: message:preprocessed      │
+│  Hook fires BEFORE AI responds       │
+└─────────────────────────────────────┘
        ↓
-1. pending[A] = {msg: "Message A", saved: false}
+┌─────────────────────────────────────┐
+│  1. EXTRACT MESSAGE                 │
+│     event.context.bodyForAgent        │
+└─────────────────────────────────────┘
        ↓
-AI generates response
+┌─────────────────────────────────────┐
+│  2. CLEANUP STALE PENDING           │
+│     If pending > 2 min → save only   │
+└─────────────────────────────────────┘
        ↓
-User sends Message B
+┌─────────────────────────────────────┐
+│  3. PAIR + SAVE PREVIOUS            │
+│     Read AI response from session    │
+│     Pair user msg + AI response     │
+│     Save to working collection       │
+└─────────────────────────────────────┘
        ↓
-Hook fires
+┌─────────────────────────────────────┐
+│  4. STORE CURRENT AS PENDING        │
+│     pending = {msg, saved: false}   │
+└─────────────────────────────────────┘
        ↓
-2. Check pending[A] → saved: false
+┌─────────────────────────────────────┐
+│  5. SEARCH MEMORY                  │
+│     Query laws + working collection  │
+└─────────────────────────────────────┘
        ↓
-3. Read AI response for Message A from session file
+┌─────────────────────────────────────┐
+│  6. INJECT CONTEXT                 │
+│     Laws (always) + Working (match)  │
+│     → event.messages (system prompt) │
+└─────────────────────────────────────┘
        ↓
-4. Save: pending[A].msg + AI response → working collection
+┌─────────────────────────────────────┐
+│  AI GENERATES RESPONSE              │
+│  (Now has context from memory)      │
+└─────────────────────────────────────┘
        ↓
-5. pending[A].saved = true, DELETE
-       ↓
-6. pending[B] = {msg: "Message B", saved: false}
+┌─────────────────────────────────────┐
+│  NEXT MESSAGE TRIGGERS PAIRING      │
+│  → Previous pending saved with      │
+│    AI response                      │
+└─────────────────────────────────────┘
+```
+
+### Key Points
+
+1. **PRE-LLM** - Hook runs before AI responds
+2. **Context injection** - AI sees relevant memories when generating response
+3. **Pairing** - User + AI saved together (not separate)
+4. **Stale cleanup** - Timer saves pending if user goes inactive
+
+### What AI Sees
+
+When AI generates response, it receives:
+
+```
+System: Relevant context:
+  - Problem: so how the pipeline?
+    Solution: **Current status:** ✅ Session key fixed...
+  - Problem: auto-save with AI response pairing
+    Solution: Message pairing + stale cleanup...
+```
+
+### Session Key Fallback
+
+If sessionKey is undefined, uses fallback:
+
+```javascript
+// Uses: session:{senderId}:{messageId}
+const sessionKey = event?.context?.sessionKey 
+    || event?.context?.sessionId 
+    || event?.sessionKey 
+    || `session:${senderId}:${messageId}`;
 ```
 
 ### Stale Cleanup (Systemd Timer)
@@ -672,9 +728,8 @@ Read pending.json
 Check pending entries > 2 minutes old
        ↓
 For each stale pending:
-  - Read last AI response from session file
-  - Save to working collection
-  - Mark pending.saved = true
+  - Save user message only
+  - Mark saved = true
 ```
 
 **Files:**
@@ -710,11 +765,13 @@ event.messages = []  // EMPTY - dont use
 event.context.bodyForAgent = "[Mon 2026-04-06 21:48 GMT+7] message"  // USE THIS
 event.context.body = "message"  // raw without prefix
 event.context.sessionKey = "agent:main:main"
+event.context.senderId = "user-id"
+event.context.messageId = "uuid"
 ```
 
 ---
 
-## Summary of Latest Changes (2026-04-06)
+## Summary of Latest Changes (2026-04-07)
 
 | Feature | Status | Description |
 |---------|--------|-------------|

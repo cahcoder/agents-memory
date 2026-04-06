@@ -79,7 +79,21 @@ loadPendingFromFile();
 
 // Get session key (session ID or fallback)
 function getSessionKey(event) {
-    return event.context && (event.context.sessionKey || event.context.sessionId);
+    // Try multiple sources for session key
+    const sessionKey = event?.context?.sessionKey 
+        || event?.context?.sessionId 
+        || event?.sessionKey 
+        || event?.sessionId;
+    
+    // If still undefined, use a fallback
+    if (!sessionKey) {
+        // Try to get from senderId + timestamp as fallback
+        const senderId = event?.context?.senderId || event?.senderId || 'unknown';
+        const msgId = event?.context?.messageId || event?.messageId || Date.now().toString();
+        return `session:${senderId}:${msgId}`;
+    }
+    
+    return sessionKey;
 }
 
 function getMessageBody(event) {
@@ -235,15 +249,27 @@ function getLastAssistantResponseFromSession(sessionKey, maxLines = 50) {
 
 // Sync version - reads last assistant message content synchronously
 function getLastAssistantMessageSync(sessionKey) {
+    if (!sessionKey || sessionKey === 'undefined') {
+        console.log("[agents-memory] Warning: sessionKey is undefined, skipping AI response capture");
+        return null;
+    }
+    
     const sessionsFile = path.join(SESSIONS_DIR, "sessions.json");
     try {
         const data = JSON.parse(fs.readFileSync(sessionsFile, "utf8"));
         const sessionEntry = data[sessionKey];
-        if (!sessionEntry || !sessionEntry.sessionFile) return null;
+        if (!sessionEntry || !sessionEntry.sessionFile) {
+            console.log("[agents-memory] Warning: session not found for key", sessionKey);
+            return null;
+        }
         
-        const sessionFile = sessionEntry.sessionFile;
-        const content = [];
-        const lines = fs.readFileSync(sessionFile, "utf8").split("\n").filter(l => l.trim());
+        const sessionFilePath = sessionEntry.sessionFile;
+        if (!fs.existsSync(sessionFilePath)) {
+            console.log("[agents-memory] Warning: session file not found", sessionFilePath);
+            return null;
+        }
+        
+        const lines = fs.readFileSync(sessionFilePath, "utf8").split("\n").filter(l => l.trim());
         
         // Read from end to find last assistant message
         for (let i = lines.length - 1; i >= 0; i--) {
@@ -252,10 +278,12 @@ function getLastAssistantMessageSync(sessionKey) {
                 if (obj.message && obj.message.role === "assistant") {
                     const msgContent = obj.message.content;
                     if (typeof msgContent === "string" && msgContent.trim()) {
+                        console.log("[agents-memory] Found AI response:", msgContent.slice(0, 50) + "...");
                         return msgContent.trim();
                     } else if (Array.isArray(msgContent)) {
                         for (const block of msgContent) {
                             if (block.type === "text" && block.text) {
+                                console.log("[agents-memory] Found AI response (block):", block.text.slice(0, 50) + "...");
                                 return block.text.trim();
                             }
                         }
@@ -263,8 +291,10 @@ function getLastAssistantMessageSync(sessionKey) {
                 }
             } catch (e) {}
         }
+        console.log("[agents-memory] No AI response found in session");
         return null;
     } catch (e) {
+        console.log("[agents-memory] Error reading session:", e.message);
         return null;
     }
 }
@@ -462,17 +492,17 @@ Example: After answering about fixing the pipeline, run:
                     }
                     
                     if (now - pending.timestamp > STALE_THRESHOLD_MS) {
-                        // Stale pending found - try to save with last AI response
-                        console.log("[agents-memory] Found stale pending from", Math.floor((now - pending.timestamp) / 1000), "seconds ago");
+                        // Stale pending found - save USER MESSAGE ONLY
+                        // Can't reliably match AI response after time gap
+                        console.log("[agents-memory] Found stale pending from", Math.floor((now - pending.timestamp) / 1000), "seconds ago - saving user msg only");
                         
-                        const lastAIResponse = getLastAssistantMessageSync(key);
                         const entry = {
                             problem: pending.userMsg.slice(0, 200),
-                            solution: lastAIResponse ? lastAIResponse.slice(0, 500) : "(no AI response captured)",
+                            solution: "(no AI response - user inactive)",
                             type: "working",
                             metadata: { 
                                 session_id: key, 
-                                role: "stale-paired",
+                                role: "stale",
                                 user_timestamp: pending.timestamp,
                                 saved_timestamp: now
                             }
@@ -481,7 +511,7 @@ Example: After answering about fixing the pipeline, run:
                         await daemonCall("write", entry);
                         console.log("[agents-memory] Auto-saved stale pending:", pending.userMsg.slice(0, 20) + "...");
                         
-                        // Mark as saved to prevent duplicate saves
+                        // Mark as saved and remove
                         pending.saved = true;
                         pendingUserMessages.delete(key);
                         savePendingToFile();
