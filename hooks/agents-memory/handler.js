@@ -253,30 +253,26 @@ async function messagePreprocessed(event) {
         const cacheKey = getCacheKey(query, 5);
         
         // ───────────────────────────────────────────────────────
-        // Save Request: Inject prompt asking AI to save response
+        // ALWAYS: Inject save prompt for every message
         // ───────────────────────────────────────────────────────
-        if (shouldSaveToMemory(rawMsg)) {
-            console.log("[agents-memory] Save request detected:", rawMsg.slice(0, 30) + "...");
-            event.messages.push({
-                role: "system",
-                content: `[memory] The user wants you to save this response to memory.
-
+        console.log("[agents-memory] Injecting save prompt for every message");
+        event.messages.push({
+            role: "system",
+            content: `[memory] IMPORTANT: Save every response to agents-memory.
+Your response will be stored in the 'working' collection (session_id: ${sessionKey || 'default'}).
 
 TASK:
-1. After providing your response, EXPLICITLY call memory write:
+1. After providing your response, call memory write:
    - cmd: write
-   - type: working
+   - type: working  
    - problem: Brief summary of what was discussed (max 200 chars)
    - solution: Key outcome or decision made
    - metadata: {session_id: "${sessionKey || 'default'}"}
 
 2. Reply with "[memory saved]" at the end of your response to confirm.
 
-
-Example response:
-"Here's the solution... [memory saved]"`
-            });
-        }
+This applies to EVERY message. AI must save every response.`
+        });
         
         // Check cache first
         const cached = getCached(cacheKey);

@@ -537,3 +537,90 @@ memory search "your query" --project "topic_id"
 
 ---
 
+
+---
+
+## Auto-Save Every Message (2026-04-06)
+
+**IMPORTANT:** Every AI response is automatically saved to the `working` collection.
+
+### How It Works
+
+```
+User: "ok proceed with production fix"
+    ↓
+PRE-LLM hook injects save prompt
+    ↓
+AI generates response
+    ↓
+AI writes to 'working' collection
+    ↓
+AI replies with "[memory saved]"
+    ↓
+Hook detects save → skips backup storage
+```
+
+### PRE-LLM Injection (Every Message)
+
+```javascript
+// Every message:preprocessed injects this:
+event.messages.push({
+    role: "system",
+    content: `[memory] IMPORTANT: Save every response to agents-memory.
+Your response will be stored in the 'working' collection (session_id: {sessionId}).
+
+TASK:
+1. After providing your response, call memory write:
+   - cmd: write
+   - type: working  
+   - problem: Brief summary of what was discussed (max 200 chars)
+   - solution: Key outcome or decision made
+   - metadata: {session_id: "{sessionId}"}
+
+2. Reply with "[memory saved]" at the end of your response to confirm.
+
+This applies to EVERY message. AI must save every response.`
+});
+```
+
+### AI Behavior
+
+1. **Receives save prompt** with every message
+2. **Calls memory write** to store in `working` collection
+3. **Confirms** with "[memory saved]" at end of response
+4. **Hook detects** confirmation → skips duplicate backup storage
+
+### Save Confirmation Patterns
+
+AI will respond with one of these to confirm save:
+- `[memory saved]`
+- `memory consolidated`
+- `saved to memory`
+- `stored in working`
+- `progress updated`
+
+If AI doesn't include save confirmation, `sessionCompactAfter` acts as backup storage.
+
+### Collection Selection
+
+| Collection | When Used | AI Action |
+|------------|-----------|-----------|
+| `working` | **Every message** | AI writes user msg + AI response |
+| `progress` | After compaction (5+ messages) | AI summarizes → deletes working → inserts to progress |
+| `laws` | **Always** on every message | Injected (not AI-written) |
+| `critical` | Alert situations | Manual write: `type=critical` |
+| `core` | Core facts/decisions | Manual write: `type=baseline` |
+
+### Gateway Restart
+
+**Yes, gateway restart is needed** to load updated handler.js:
+
+```bash
+nohup openclaw gateway restart > /dev/null 2>&1 &
+```
+
+Or use:
+```bash
+systemctl --user restart openclaw-gateway.service
+```
+
