@@ -79,6 +79,61 @@ cmd_bootstrap() {
     fi
 }
 
+cmd_init() {
+    local project="$1"
+    
+    echo -e "${YELLOW}🚀 Initializing memory...${NC}"
+    python3 "$SKILL_DIR/memory_init.py" "$project"
+}
+
+cmd_init_project() {
+    local project="$1"
+    local folder="${2:-}"
+    
+    echo -e "${YELLOW}🚀 Initializing project folder: $folder${NC}"
+    
+    # Detect AI CLI tool to set project folder
+    local project_dir=""
+    case "$folder" in
+        claude*) project_dir="~/claude-projects" ;;
+        opencode*) project_dir="~/opencode/projects" ;;
+        codex*|cursor*) project_dir="~/.cursor/projects" ;;
+        *) project_dir="~/projects" ;;
+    esac
+    
+    # Create project folder if not exists
+    if [[ -n "$project_dir" ]]; then
+        mkdir -p "$project_dir/$project" 2>/dev/null
+    fi
+    
+    # Initialize project context via AGENTS.md
+    AGENTS_MD="$HOME/.openclaw/workspace/AGENTS.md"
+    
+    # Create/append AGENTS.md project section
+    echo "" >> "$AGENTS_MD"
+    echo "## $project" >> "$AGENTS_MD"
+    echo "" >> "$AGENTS_MD"
+    echo "Date: $(date '+%Y-%m-%d')" >> "$AGENTS_MD"
+    echo "" >> "$AGENTS_MD"
+    
+    # Add placeholder structure
+    echo "### Tech Stack" >> "$AGENTS_MD"
+    echo "- Framework:" >> "$AGENTS_MD"
+    echo "- Database:" >> "$AGENTS_MD"
+    echo "- Frontend:" >> "$AGENTS_MD"
+    echo "- Other:" >> "$AGENTS_MD"
+    echo "" >> "$AGENTS_MD"
+    echo "### Workflow" >> "$AGENTS_MD"
+    echo "- Build:" >> "$AGENTS_MD"
+    echo "- Test:" >> "$AGENTS_MD"
+    echo "- Deploy:" >> "$AGENTS_MD"
+    echo "" >> "$AGENTS_MD"
+    echo "### Important Notes" >> "$AGENTS_MD"
+    echo "Any critical decisions, constraints, or rules for this project." >> "$AGENTS_MD"
+    
+    echo "Project initialized at $project_dir/$project" >> "$AGENTS_MD"
+}
+
 cmd_gc() {
     echo -e "${YELLOW}🧹 Garbage collection...${NC}"
     python3 "$SKILL_DIR/memory_gc.py" "$@"
@@ -93,18 +148,22 @@ cmd_intelligence() {
     python3 "$SCRIPT_DIR/intelligence.py" "$subcmd"
 }
 
-cmd_prellm() {
+cmd_pre() {
     # For pre-LLM hook: output context only, no extra text
     local input="$1"
     local project="${2:-default}"
-    python3 "$SKILL_DIR/memory_search.py" "$input" --project "$project" --limit 5 2>/dev/null
+    
+    # Query for context (uses LAWS_LIMIT env var for laws collection)
+    local limit="${LAWS_LIMIT:-}"
+    python3 "$SKILL_DIR/memory_search.py" "$input" --project "$project" --limit "$limit" 2>/dev/null
 }
 
-cmd_postllm() {
+cmd_post() {
     # For post-LLM hook: store without verbose output
     local problem="$1"
-    local solution="$2"
+    local solution="${2}"
     local project="${3:-default}"
+    
     python3 "$SKILL_DIR/memory_write.py" "$problem" --solution "$solution" --type solution --project "$project" 2>/dev/null
 }
 
@@ -116,26 +175,34 @@ ${GREEN}🧠 Semantic Memory Wrapper${NC}
 Usage: memory <command> [args]
 
 Commands:
-  search <query> [project] [limit]    Search memory
+  init                      Initialize project context (reads AGENTS.md)
+  init-project <name> [folder]  Initialize project folder and AGENTS.md entry
+  search <query> [project] [limit]    Search memory (supports LAWS_LIMIT env for laws)
   write <problem> [solution] [project] Store learning
   bootstrap <project> [arch]          Init project memory
   gc [options]                        Garbage collection
   stats                               Show memory stats
-  pre <input> [project]               PRE-LLM hook
+  pre <input> [project]               PRE-LLM hook (uses LAWS_LIMIT for laws)
   post <problem> <solution> [proj]    POST-LLM hook
-  patterns                            Detect patterns
-  velocity                            Learning velocity
-  suggestions                          AI suggestions
 
-Examples:
-  memory search "postgres restart"
-  memory write "container crash" "docker restart {name}"
-  memory bootstrap myproject --architecture "FastAPI + Postgres"
-  memory gc --stats
-
-Environment:
+Environment Variables:
   SKILL_DIR    Path to skill scripts (default: ~/semantic-clawmemory/skill)
   MEMORY_DIR   Path to Chroma DB (default: ~/.memory/chroma)
+  LAWS_LIMIT  Limit for laws collection queries (default: 5, set to 0 for unlimited)
+
+Examples:
+  # Initialize project (reads AGENTS.md)
+  memory init
+  
+  # Initialize project folder + AGENTS.md
+  memory init-project myproject --folder ~/claude-projects
+  
+  # Search (uses LAWS_LIMIT for laws)
+  memory search "postgres restart"
+  LAWS_LIMIT=0 memory search laws  # Get all laws
+  
+  # Store learning
+  memory write "container crash" "docker restart"
 
 EOF
 }
@@ -145,15 +212,16 @@ CMD="${1:-}"
 shift 2>/dev/null || true
 
 case "$CMD" in
-    search)    cmd_search "$@" ;;
-    write)     cmd_write "$@" ;;
-    bootstrap) cmd_bootstrap "$@" ;;
-    gc)        cmd_gc "$@" ;;
-    stats)     cmd_stats ;;
-    pre)       cmd_prellm "$@" ;;
-    post)      cmd_postllm "$@" ;;
-    patterns|velocity|suggestions) cmd_intelligence "$CMD" ;;
-    -h|--help|help) show_help ;;
+    init)              cmd_init "$@" ;;
+    init-project)       cmd_init_project "$@" ;;
+    search)            cmd_search "$@" ;;
+    write)             cmd_write "$@" ;;
+    bootstrap)          cmd_bootstrap "$@" ;;
+    gc)                 cmd_gc "$@" ;;
+    stats)              cmd_stats ;;
+    pre)                cmd_pre "$@" ;;
+    post)               cmd_post "$@" ;;
+    -h|--help|help)   show_help ;;
     *)         
         if [[ -z "$CMD" ]]; then
             show_help
