@@ -430,7 +430,7 @@ def _score_result(entry, query="", recency_weight=0.05):
     return score
 
 
-def search_memory(query, project=None, entry_type=None, limit=5, collection=None, use_expansion=True, where=None):
+def search_memory(query, project=None, entry_type=None, limit=5, collection=None, use_expansion=True, where=None, precomputed_embedding=None):
     """Search across collections with optimized scoring and optional query expansion.
     
     Args:
@@ -441,6 +441,7 @@ def search_memory(query, project=None, entry_type=None, limit=5, collection=None
         collection: If specified, search only this collection (string). Otherwise search all.
         use_expansion: If True, expand query with synonyms for better recall (default: True)
         where: Additional where filter dict (e.g. {"session_id": "xyz"})
+        precomputed_embedding: Pre-computed embedding from daemon cache (Issue 9 fix — avoids recompute)
     
     Returns:
         List of results sorted by weighted score (similarity + priority + importance + recency)
@@ -467,7 +468,8 @@ def search_memory(query, project=None, entry_type=None, limit=5, collection=None
     # Single collection: direct call (no ThreadPool overhead)
     if collection:
         single_result = _search_single_collection(
-            (collection, query, limit, base_where if base_where else None, client, ef)
+            (collection, query, limit, base_where if base_where else None, client, ef,
+             precomputed_embedding)  # Issue 9: pass cached embedding
         )
         # Score and sort (pass query for keyword cross-validation)
         for entry in single_result:
@@ -478,12 +480,12 @@ def search_memory(query, project=None, entry_type=None, limit=5, collection=None
     # Multiple collections: parallel search with ThreadPoolExecutor
     collections_to_query = list(COLLECTIONS)
 
-    # Pre-compute embedding ONCE for all collections (major optimization)
-    precomputed_embedding = ef([query]) if ef else None
+    # Issue 9: Use precomputed embedding from daemon cache if provided, else compute once here
+    embedding_to_use = precomputed_embedding if precomputed_embedding is not None else (ef([query]) if ef else None)
 
     # Build args for each collection (pass precomputed embedding to all)
     worker_args = [
-        (col_name, query, limit, base_where if base_where else None, client, ef, precomputed_embedding)
+        (col_name, query, limit, base_where if base_where else None, client, ef, embedding_to_use)
         for col_name in collections_to_query
     ]
 

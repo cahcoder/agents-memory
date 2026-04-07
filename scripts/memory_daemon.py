@@ -221,6 +221,34 @@ def update_retrieval_metadata(results):
         pass  # Non-critical if threading fails
 
 
+def get_or_cache_embedding(query_text: str):
+    """Get embedding from cache or compute it. Issue 9 fix: actually use embedding_cache."""
+    if not query_text:
+        return None
+    
+    key = hashlib.md5(query_text.encode()).hexdigest()
+    
+    if key in embedding_cache:
+        embedding_cache.move_to_end(key)  # LRU update
+        return embedding_cache[key]
+    
+    # Compute embedding
+    try:
+        ef = get_embedding_function()
+        embedding = ef([query_text])  # Returns list of embeddings
+        
+        # Evict oldest if at capacity
+        if len(embedding_cache) >= EMBEDDING_CACHE_MAX:
+            embedding_cache.popitem(last=False)
+        
+        embedding_cache[key] = embedding
+        log.debug(f"Embedding cached for: {query_text[:30]}...")
+        return embedding
+    except Exception as e:
+        log.warning(f"Embedding cache compute failed: {e}")
+        return None
+
+
 def handle_search(args):
     """Search memory using shared search_memory function with caching."""
     global METRICS, CURRENT_PROJECT
@@ -245,6 +273,9 @@ def handle_search(args):
     
     METRICS["cache_misses"] += 1
     
+    # Issue 9: Pre-compute embedding once, reuse across all collection searches
+    precomputed_embedding = get_or_cache_embedding(query)
+    
     # Execute search
     session_id = args.get("session_id") or (args.get("filter") or {}).get("session_id")
     results = search_memory(
@@ -253,7 +284,8 @@ def handle_search(args):
         entry_type=entry_type,
         limit=limit,
         collection=collection,
-        where={"session_id": session_id} if session_id else None
+        where={"session_id": session_id} if session_id else None,
+        precomputed_embedding=precomputed_embedding
     )
     
     # Track metrics
@@ -440,7 +472,9 @@ def handle_stats(args):
         "query_cache_ttl": QUERY_CACHE_TTL,
         "hits": METRICS["cache_hits"],
         "misses": METRICS["cache_misses"],
-        "hit_rate": round(cache_hit_rate, 3)
+        "hit_rate": round(cache_hit_rate, 3),
+        "embedding_cache_size": len(embedding_cache),
+        "embedding_cache_max": EMBEDDING_CACHE_MAX
     }
     
     # Add metrics

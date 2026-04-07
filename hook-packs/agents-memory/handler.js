@@ -25,6 +25,7 @@ const fs = require("fs");
 const os = require("os");
 const net = require("net");
 const path = require("path");
+const crypto = require("crypto");
 
 const SOCKET = process.env.HOME + "/.memory/agents-memory/daemon.sock";
 const MEMORY_DIR = process.env.HOME + "/.memory/agents-memory";
@@ -33,7 +34,7 @@ const SESSIONS_DIR = path.join(os.homedir(), ".openclaw", "agents", "main", "ses
 // Cache configuration
 const CACHE_TTL = 300000;  // 5 minutes (300s)
 const CACHE_MAX = 100;
-const MAX_INJECT_CHARS = 1500;
+const MAX_INJECT_CHARS = 5000;
 
 // Simple in-memory cache for query results (LRU with TTL)
 const cache = new Map();
@@ -479,8 +480,8 @@ function daemonCall(cmd, args = {}) {
     });
 }
 
-function getCacheKey(query, limit) {
-    return `${query.slice(0, 100)}:${limit}`;
+function getCacheKey(query, collection, limit) {
+    return crypto.createHash('md5').update(`${query}:${collection}:${limit}`).digest('hex');
 }
 
 function getCached(key) {
@@ -650,7 +651,7 @@ After saving, respond with "[memory compacted]"`
     try {
         const originalQuery = rawMsg.slice(0, 100);
         const query = optimizeQuery(rawMsg);
-        const cacheKey = getCacheKey(query, 5);
+        const cacheKey = getCacheKey(query, 'multi', 5);
 
         // ───────────────────────────────────────────────────────
         // FLOW:
@@ -700,16 +701,6 @@ After saving, respond with "[memory compacted]"`
         
         // NOTE: We DON'T save here. message:sent will handle saving AI response.
 
-        const workingResponse = await daemonCall("search", {
-            query: query,
-            collection: "working",
-            limit: 3,
-            filter: { session_id: sessionKey }
-        });
-
-        const workingResults = workingResponse && workingResponse.data && workingResponse.data.data || [];
-        console.log("[agents-memory] Working:", workingResults.length, "entries");
-
         // ───────────────────────────────────────────────────────
         // Step 3: Check compaction threshold
         // ───────────────────────────────────────────────────────
@@ -717,60 +708,63 @@ After saving, respond with "[memory compacted]"`
 
         if (sessionTracking.msgCount >= COMPACTION_THRESHOLD) {
             console.log("[agents-memory] Threshold reached:", sessionTracking.msgCount, "/", COMPACTION_THRESHOLD);
-            event.messages.push({
-                role: "system",
-                content: `[memory: ${sessionTracking.msgCount} messages. Threshold: ${COMPACTION_THRESHOLD}.]`
-            });
+            await executeCompaction(sessionKey, event);
+            sessionTracking.msgCount = 0;
         }
 
         // ───────────────────────────────────────────────────────
-        // Step 4: Combine results and inject
+        // Step 4: LAWS — Always injected (unconditional)
         // ───────────────────────────────────────────────────────
-        const allResults = [...(workingResults || [])];
-
-        if (allResults.length) {
-            const snippets = allResults.slice(0, 3).map(r => extractSnippet(r, rawMsg));
-
-            let totalChars = 0;
-            let contextParts = [];
-
-            for (const snippet of snippets) {
-                if (totalChars + snippet.length + 50 > MAX_INJECT_CHARS) break;
-                contextParts.push(snippet);
-                totalChars += snippet.length + 50;
+        let injectedChars = 0;
+        try {
+            const lawsRes = await daemonCall("search", { query: "rules guidelines laws", collection: "laws", limit: 20 });
+            const laws = lawsRes?.data?.data || [];
+            if (laws.length > 0) {
+                const lawText = laws.map(l => l.content || "").join("\n---\n").slice(0, 2000);
+                event.messages.push({ role: "system", content: "LAWS (always follow):\n" + lawText });
+                injectedChars += lawText.length;
             }
+        } catch(e) {
+            console.warn("[agents-memory] laws inject error:", e.message);
+        }
 
-            if (contextParts.length) {
-                event.messages.push({
-                    role: "system",
-                    content: "Relevant context:\n" + contextParts.join("\n")
-                });
-                console.log("[agents-memory] Injected", contextParts.length, "snippets");
+        // ───────────────────────────────────────────────────────
+        // Step 5: Semantic search across important collections
+        // ───────────────────────────────────────────────────────
+        const semanticCollections = ["working", "tasks", "progress", "core", "important"];
+        const semanticResults = [];
+        for (const col of semanticCollections) {
+            try {
+                const r = await daemonCall("search", { query, collection: col, limit: 2 });
+                const items = r?.data?.data || [];
+                items.forEach(item => { item._collection = col; semanticResults.push(item); });
+            } catch(e) {}
+        }
+        // Sort by score descending
+        semanticResults.sort((a, b) => (b.score || b.similarity || 0) - (a.score || a.similarity || 0));
+
+        // Inject top results up to MAX_INJECT_CHARS
+        if (semanticResults.length > 0) {
+            const snippets = [];
+            for (const r of semanticResults.slice(0, 5)) {
+                const snippet = extractSnippet(r, rawMsg);
+                if (injectedChars + snippet.length > MAX_INJECT_CHARS) break;
+                snippets.push(`[${r._collection}] ${snippet}`);
+                injectedChars += snippet.length;
+            }
+            if (snippets.length > 0) {
+                event.messages.push({ role: "system", content: "Relevant context:\n" + snippets.join("\n") });
+                console.log("[agents-memory] Injected", snippets.length, "semantic results");
             }
         } else {
-            console.log("[agents-memory] No search results - still injecting auto-save");
+            console.log("[agents-memory] No semantic results - still injecting auto-save");
         }
 
         // ───────────────────────────────────────────────────────
         // MANDATORY: Auto-save instruction via memory_save MCP tool
         // ───────────────────────────────────────────────────────
         const userMsgType = determineCollection(rawMsg, "");
-        const autoSaveInstruction = `[MEMORY AUTO-SAVE] After generating your response, you MUST call memory-save__memory_save to save this exchange.
-
-Collection rules (use user message to determine):
-- "make this a rule/guideline/workflow" → collection: "laws"
-- "how to/fix/debug/explain/what/why/help" → collection: "tasks"  
-- "done/finished/completed/fixed/working" → collection: "progress"
-- "will/plan to/going to/next step/roadmap" → collection: "plan"
-- "remember/important/preference/don't forget" → collection: "important"
-- greetings/thanks/ok → collection: "casual"
-- anything else → collection: "prompts"
-
-Current user message type detected: ${userMsgType}
-
-Call: memory-save__memory_save(problem="<user msg summary, max 200 chars>", solution="<your response summary, max 500 chars>", collection="${userMsgType}")
-
-This is MANDATORY. Do NOT skip.`;
+        const autoSaveInstruction = `[MEM] After responding, call memory-save__memory_save(problem="<summary 200chars>", solution="<response 500chars>", collection="${userMsgType}"). Required.`;
         event.messages.push({
             role: "system",
             content: autoSaveInstruction
@@ -872,7 +866,7 @@ async function sessionCompactAfter(event) {
 // ───────────────────────────────────────────────────────
 // Compaction: Summarize working collection and consolidate
 // ───────────────────────────────────────────────────────
-async function executeCompaction(sessionKey) {
+async function executeCompaction(sessionKey, event) {
     console.log("[agents-memory] Executing compaction for session:", sessionKey);
 
     const tracking = sessionCompactionTracking.get(sessionKey);
@@ -882,7 +876,6 @@ async function executeCompaction(sessionKey) {
     }
 
     const sessionMsgCount = tracking.msgCount;
-    const lastCompactedCount = tracking.lastCompactedMsgCount || 0;
 
     try {
         // ───────────────────────────────────────────────────────
@@ -904,36 +897,15 @@ async function executeCompaction(sessionKey) {
         }
 
         // ───────────────────────────────────────────────────────
-        // Step 2: Generate summary (ask AI to do this)
+        // Step 2: Delete old entries and insert summary prompt
         // ───────────────────────────────────────────────────────
-
-        // ───────────────────────────────────────────────────────
-        // Simple approach: concat messages and ask user/AI for summary
-        // ───────────────────────────────────────────────────────
-
         const allText = allMessages.map(m => m.content || "").join("\n\n");
-        const summaryPrompt = `Based on the following conversation messages, provide a concise summary:\n\n${allText}\n\nSummary should cover: main topic, key decisions, and current status.\n\nFormat: "{Topic} - Progress" followed by bullet points.`;
+        const summaryPrompt = `[MEMORY COMPACT] Consolidate ${allMessages.length} messages. Summary (max 500 chars): ` + allText.slice(0, 2000);
 
-        const messagesSummary = `(Session has ${allMessages.length} messages) - Summarize all.`;
-
-        console.log("[agents-memory] Summary prompt:", messagesSummary);
         console.log("[agents-memory] Injecting summary prompt for AI");
-
-        event.messages.push({
-            role: "system",
-            content: summaryPrompt
-        });
-
-        // Note: For now, we don't wait for AI response to get the summary.
-        // In future, can add hook for "message:final" or use callback pattern.
-
-        // ───────────────────────────────────────────────────────
-        // Step 3: Delete old entries and insert summary
-        // ───────────────────────────────────────────────────────
-
-        // For now, just delete all messages for this session
-        // The AI will handle summarization and create new entry
-        console.log("[agents-memory] Deleting old entries from working collection for session:", sessionKey);
+        if (event && event.messages) {
+            event.messages.push({ role: "system", content: summaryPrompt });
+        }
 
         await daemonCall("delete", {
             filter: { session_id: sessionKey },
