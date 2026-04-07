@@ -22,3 +22,6 @@ docs/ACTION-PLAN.md
 # Dev config
 .memory/
 *.log
+
+# Development files (internal only)
+development/

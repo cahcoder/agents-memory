@@ -45,3 +45,6 @@ docs/OPENCLAW-INTEGRATION.md
 
 # Package manager
 package-lock.json
+
+# Development files (internal only)
+development/
