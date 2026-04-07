@@ -1,14 +1,14 @@
 /**
  * agents-memory Managed Hook (CommonJS)
  * Events: message:preprocessed, session:compact:after
- * 
+ *
  * Features:
  * - LRU cache with TTL
  * - Query optimization (truncation + stopword removal)
  * - Connection keep-alive
  * - LAWS collection (always injected)
  * - WORKING collection (tracks conversations, compaction trigger)
- * 
+ *
  * OpenClaw Event Structure (message:preprocessed):
  * - event.messages = [] (EMPTY - dont use!)
  * - event.context.bodyForAgent = "[Mon 2026-04-06 21:48 GMT+7] message" (clean)
@@ -38,6 +38,111 @@ const cache = new Map();
 // Compaction configuration
 const COMPACTION_THRESHOLD = 5; // Trigger after 5 messages per session
 const COMPACTION_KEYWORD = "MEMORY CONSOLIDATED";
+
+// Determine which collection to save to based on content
+// Map hook collection names to daemon type names
+const COLLECTION_MAP = {
+    "tasks": "solution",    // problem→solution → tasks collection
+    "progress": "summary",  // completed work → progress collection
+    "plan": "decision",     // goals/roadmap → progress collection (stored as decision type)
+    "working": "working",    // AI responses → working collection
+    "prompts": "prompt",     // user messages → prompts collection
+    "important": "fact",     // important facts → important collection
+    "core": "baseline",     // core baselines → core collection
+    "critical": "critical"   // time-sensitive → critical collection
+};
+
+// Determine which collection to save to based on message content
+// Both user prompt AND AI response go to the SAME collection
+function determineCollection(userMsg, aiResponse) {
+    const text = (userMsg + " " + (aiResponse || "")).toLowerCase();
+
+    // laws (highest priority - explicit user instruction)
+    const lawsPatterns = [
+        /make this (a |your )?(rule|guideline|workflow|law)/i,
+        /this is a (rule|guideline|law|principle)/i,
+        /always (do|must|should)/i,
+        /never (do|must|should)/i,
+        /this (should|must) be (done|followed)/i
+    ];
+
+    // Progress indicators
+    const progressPatterns = [
+        /done|completed|finished|fixed|solved/i,
+        /just did|already|success|working now/i,
+        /its working|i got it|i fixed/i,
+        /updated|changed|modified|improved/i
+    ];
+
+    // Plan indicators
+    const planPatterns = [
+        /will|going to|plan to|intend/i,
+        /next step|next phase|roadmap/i,
+        /should do|need to|must do|will do/i,
+        /tomorrow|later|eventually/i
+    ];
+
+    // Important facts
+    const importantPatterns = [
+        /remember|important|preference/i,
+        /don't forget|note that|keep in mind/i,
+        /my (name|preference|setting|config)/i
+    ];
+
+    // Core (baseline architecture/decisions)
+    const corePatterns = [
+        /architecture|project structure|tech stack/i,
+        /baseline|core (decision|knowledge|rule)/i,
+        /this is (how|the way) we (do|build)/i
+    ];
+
+    // Tasks (questions/how-to)
+    const taskPatterns = [
+        /how (to|do)|what (is|are|do)|why (is|does|did)/i,
+        /help me|explain|learn|i need|i want/i,
+        /can you|could you|would you|please/i,
+        /fix|debug|test|check|verify|implement/i,
+        /create|build|make|develop|setup/i
+    ];
+
+    // Casual
+    const casualPatterns = [
+        /^hi|^hey|^hello|^thanks|^ok|^yes|^no/i,
+        /^(ok|okay|good|nice|yeah)/i,
+        /^sure|^fine|^cool/i
+    ];
+
+    // Check in priority order
+    for (const pattern of lawsPatterns) {
+        if (pattern.test(text)) return "laws";
+    }
+
+    for (const pattern of progressPatterns) {
+        if (pattern.test(text)) return "progress";
+    }
+
+    for (const pattern of planPatterns) {
+        if (pattern.test(text)) return "plan";
+    }
+
+    for (const pattern of importantPatterns) {
+        if (pattern.test(text)) return "important";
+    }
+
+    for (const pattern of corePatterns) {
+        if (pattern.test(text)) return "core";
+    }
+
+    for (const pattern of taskPatterns) {
+        if (pattern.test(text)) return "tasks";
+    }
+
+    for (const pattern of casualPatterns) {
+        if (pattern.test(text)) return "casual";
+    }
+
+    return "prompts"; // Default - user's prompts/questions
+}
 
 // Session tracking
 let conversationHistory = [];
@@ -80,11 +185,11 @@ loadPendingFromFile();
 // Get session key (session ID or fallback)
 function getSessionKey(event) {
     // Try multiple sources for session key
-    const sessionKey = event?.context?.sessionKey 
-        || event?.context?.sessionId 
-        || event?.sessionKey 
+    const sessionKey = event?.context?.sessionKey
+        || event?.context?.sessionId
+        || event?.sessionKey
         || event?.sessionId;
-    
+
     // If still undefined, use a fallback
     if (!sessionKey) {
         // Try to get from senderId + timestamp as fallback
@@ -92,7 +197,7 @@ function getSessionKey(event) {
         const msgId = event?.context?.messageId || event?.messageId || Date.now().toString();
         return `session:${senderId}:${msgId}`;
     }
-    
+
     return sessionKey;
 }
 
@@ -101,27 +206,27 @@ function getMessageBody(event) {
     // - event.context.bodyForAgent = clean user message
     // - event.context.body = raw message (may include prefix)
     // - event.messages = array of conversation messages (user + assistant) - usually EMPTY!
-    
+
     // Priority 1: event.context.bodyForAgent (clean message)
     if (event.context && event.context.bodyForAgent) {
         console.log("[agents-memory] DEBUG: Using event.context.bodyForAgent");
         return event.context.bodyForAgent;
     }
-    
+
     // Priority 2: event.context.body (raw message)
     if (event.context && event.context.body) {
         console.log("[agents-memory] DEBUG: Using event.context.body");
         return event.context.body;
     }
-    
+
     const messages = event.messages || [];
-    
+
     // Debug: log what we have
     if (messages.length === 0) {
         console.log("[agents-memory] DEBUG: No messages in event");
         console.log("[agents-memory] DEBUG: Available keys:", Object.keys(event).join(", "));
         console.log("[agents-memory] DEBUG: event.context keys:", event.context ? Object.keys(event.context).join(", ") : "null");
-        
+
         // Try other fallbacks
         if (event.content) {
             console.log("[agents-memory] DEBUG: Using event.content");
@@ -141,7 +246,7 @@ function getMessageBody(event) {
         }
         return "";
     }
-    
+
     // Get last user message (not assistant)
     for (let i = messages.length - 1; i >= 0; i--) {
         if (messages[i] && messages[i].role === "user") {
@@ -160,13 +265,13 @@ function getMessageBody(event) {
             return JSON.stringify(content);
         }
     }
-    
+
     // Fallback: return last message content
     const lastMsg = messages[messages.length - 1];
     if (lastMsg && lastMsg.content) {
         return typeof lastMsg.content === "string" ? lastMsg.content : JSON.stringify(lastMsg.content);
     }
-    
+
     return "";
 }
 
@@ -212,11 +317,11 @@ function getLastAssistantResponseFromSession(sessionKey, maxLines = 50) {
         const data = JSON.parse(fs.readFileSync(sessionsFile, "utf8"));
         const sessionEntry = data[sessionKey];
         if (!sessionEntry || !sessionEntry.sessionFile) return null;
-        
+
         const sessionFile = sessionEntry.sessionFile;
         const lines = [];
         const stream = fs.createReadStream(sessionFile, { encoding: "utf8", limit: 2 * 1024 * 1024 });
-        
+
         return new Promise((resolve) => {
             let buffer = "";
             stream.on("data", (chunk) => {
@@ -253,7 +358,7 @@ function getLastAssistantMessageSync(sessionKey) {
         console.log("[agents-memory] Warning: sessionKey is undefined, skipping AI response capture");
         return null;
     }
-    
+
     const sessionsFile = path.join(SESSIONS_DIR, "sessions.json");
     try {
         const data = JSON.parse(fs.readFileSync(sessionsFile, "utf8"));
@@ -262,15 +367,15 @@ function getLastAssistantMessageSync(sessionKey) {
             console.log("[agents-memory] Warning: session not found for key", sessionKey);
             return null;
         }
-        
+
         const sessionFilePath = sessionEntry.sessionFile;
         if (!fs.existsSync(sessionFilePath)) {
             console.log("[agents-memory] Warning: session file not found", sessionFilePath);
             return null;
         }
-        
+
         const lines = fs.readFileSync(sessionFilePath, "utf8").split("\n").filter(l => l.trim());
-        
+
         // Read from end to find last assistant message
         for (let i = lines.length - 1; i >= 0; i--) {
             try {
@@ -303,12 +408,12 @@ function daemonCall(cmd, args = {}) {
     const client = net.createConnection({ path: SOCKET });
     const payload = JSON.stringify({ cmd, args });
     client.write(payload);
-    
+
     const chunks = [];
     client.on("data", chunk => {
         chunks.push(chunk);
     });
-    
+
     return new Promise((resolve, reject) => {
         client.on("end", () => {
             const response = Buffer.concat(chunks).toString();
@@ -319,11 +424,11 @@ function daemonCall(cmd, args = {}) {
                 reject(e);
             }
         });
-        
+
         client.on("error", (err) => {
             reject(err);
         });
-        
+
         // Timeout
         setTimeout(() => {
             client.destroy();
@@ -356,7 +461,7 @@ function setCache(key, data) {
             cache.delete(oldestKey);
         }
     }
-    
+
     const entry = {
         ts: Date.now(),
         data
@@ -385,7 +490,7 @@ function optimizeQuery(query) {
 function extractSnippet(result, query) {
     const content = result.content || result.metadata?.content || "";
     const lines = content.split('\n').filter(l => l.trim());
-    
+
     for (const line of lines) {
         if (line.toLowerCase().includes(query.toLowerCase())) {
             return line.slice(0, 200);
@@ -410,232 +515,176 @@ async function messagePreprocessed(event) {
         console.log("[agents-memory] DEBUG event keys:", Object.keys(event).join(", "));
     }
     if (!rawMsg || rawMsg.length < 3) return;
-    
-    // Skip commands for learning
+
+    // ───────────────────────────────────────────────────────
+    // Handle /memory compact command
+    // ───────────────────────────────────────────────────────
+    if (/^\/memory\s*compact/i.test(rawMsg)) {
+        console.log("[agents-memory] Detected /memory compact command");
+        event.messages.push({
+            role: "system",
+            content: `[MEMORY COMPACT] User requested memory consolidation.
+
+Your task:
+1. Review the recent conversation history
+2. Create a summary of key points, decisions, and learnings
+3. Save to memory using exec:
+   exec: ~/.npm-global/bin/agents-memory write "<summary title>" -s "<detailed summary of what was discussed, decided, and accomplished>" -t working
+
+After saving, respond with "[memory compacted]"`
+        });
+        return; // Don't process as regular message
+    }
+
+    // Skip other commands for learning
     if (isCommand(rawMsg)) {
         console.log("[agents-memory] Skipping command - not learning material");
         return;
     }
-    
+
     // Track conversation
     conversationHistory.push({ role: "user", content: rawMsg });
     messageCountSinceCompact++;
-    
+
     const sessionKey = getSessionKey(event);
-    
+
     // Get or create session tracking
     let sessionTracking = sessionCompactionTracking.get(sessionKey);
     if (!sessionTracking) {
         sessionTracking = { msgCount: 0, lastCompactedMsgCount: 0 };
         sessionCompactionTracking.set(sessionKey, sessionTracking);
     }
-    
+
     try {
         const originalQuery = rawMsg.slice(0, 100);
         const query = optimizeQuery(rawMsg);
         const cacheKey = getCacheKey(query, 5);
+
+        // ───────────────────────────────────────────────────────
+        // FLOW:
+        // 1. Check if there's PENDING user message that needs AI response paired
+        // 2. Clean up STALE pending (no AI response after 2 min)
+        // 3. Set new PENDING for current user message
+        // 4. When AI responds later, it will be paired with this pending
+        // ───────────────────────────────────────────────────────
+        
+        const STALE_THRESHOLD_MS = 120000; // 2 minutes
+        const now = Date.now();
         
         // ───────────────────────────────────────────────────────
-        // ALWAYS: Inject save prompt for every message
+        // 1. Check for pending that needs pairing
         // ───────────────────────────────────────────────────────
-        // Inject memory_save tool prompt - use exec to call memory-save
-        console.log("[agents-memory] Injecting memory_save prompt");
-        event.messages.push({
-            role: "system",
-            content: `[MEMORY] IMPORTANT: After EVERY response, you MUST save to memory.
-
-Use exec tool to call:
-memory-save write "<what user asked>" -s "<what you answered or did>" -t <collection>
-
-Collections:
-- tasks: Problem → solution pairs
-- progress: Status updates
-- plan: Goals/roadmap
-- working: Conversation highlights
-
-After exec, reply with "[memory saved]"
-
-Examples:
-- User: "how does it work?" → exec: memory-save write "Pipeline explanation" -s "Explained auto-save flow" -t tasks
-- User: "fix that bug" → exec: memory-save write "Fixed memory bug" -s "Changed to use memory-save alias" -t tasks
-
-ALWAYS save after each response.`
-        });
+        const lastAIResponse = getLastAssistantMessageSync(sessionKey);
+        const pending = pendingUserMessages.get(sessionKey);
         
-        // Check cache first
-        const cached = getCached(cacheKey);
-        let results;
+        if (pending && !pending.saved && lastAIResponse && lastAIResponse.length > 0) {
+            // AI responded! Save PAIRED (user question + AI answer) to SAME collection
+            // Determine collection based on user question, not AI response
+            const pendingCollection = determineCollection(pending.userMsg, lastAIResponse);
+            const pendingType = COLLECTION_MAP[pendingCollection] || pendingCollection;
+            
+            await daemonCall("write", {
+                problem: pending.userMsg.slice(0, 200),
+                solution: lastAIResponse.slice(0, 500),
+                type: pendingType,
+                metadata: { session_id: sessionKey, role: "paired", original_collection: pendingCollection }
+            });
+            console.log("[agents-memory] Saved paired to", pendingCollection, "(type:", pendingType + ")");
+            
+            pending.saved = true;
+            pendingUserMessages.delete(sessionKey);
+            savePendingToFile();
+        }
         
-        if (cached) {
-            console.log("[agents-memory] Cache hit:", originalQuery.slice(0, 30) + "...");
-            results = cached;
-        } else {
-            console.log("[agents-memory] Query:", originalQuery.slice(0, 30) + "...");
+        // ───────────────────────────────────────────────────────
+        // 2. Clean up STALE pending (user didn't wait for AI response)
+        // ───────────────────────────────────────────────────────
+        for (const [key, p] of pendingUserMessages.entries()) {
+            if (p.saved) continue;
             
-            // ───────────────────────────────────────────────────────
-            // Step 1: LAWS — Always injected (unconditional)
-            // ───────────────────────────────────────────────────────
-            let lawsResults = [];
-            try {
-                const lawsResponse = await daemonCall("search", {
-                    query: "LAWS_COLLECTION_QUERY",
-                    collection: "laws",
-                    limit: 50
+            if (now - p.timestamp > STALE_THRESHOLD_MS) {
+                // User left without AI response
+                const staleCollection = determineCollection(p.userMsg, "");
+                const staleType = COLLECTION_MAP[staleCollection] || staleCollection;
+                await daemonCall("write", {
+                    problem: p.userMsg.slice(0, 200),
+                    solution: "(no AI response - user inactive)",
+                    type: staleType,
+                    metadata: { session_id: key, role: "stale", original_collection: staleCollection }
                 });
-                lawsResults = lawsResponse && lawsResponse.data && lawsResponse.data.data || [];
-                console.log("[agents-memory] Laws:", lawsResults.length, "entries");
-            } catch (e) {
-                console.warn("[agents-memory] Laws query failed:", e.message);
-            }
-            
-            // ───────────────────────────────────────────────────────
-            // Step 2: Working collection — AUTO-SAVE with AI response pairing
-            // ───────────────────────────────────────────────────────
-            try {
-                // Clean up STALE pending messages (older than 2 minutes = user inactive)
-                const STALE_THRESHOLD_MS = 120000; // 2 minutes
-                const now = Date.now();
-                
-                for (const [key, pending] of pendingUserMessages.entries()) {
-                    // Skip if already saved/inactive
-                    if (pending.saved) {
-                        continue;
-                    }
-                    
-                    if (now - pending.timestamp > STALE_THRESHOLD_MS) {
-                        // Stale pending found - save USER MESSAGE ONLY
-                        // Can't reliably match AI response after time gap
-                        console.log("[agents-memory] Found stale pending from", Math.floor((now - pending.timestamp) / 1000), "seconds ago - saving user msg only");
-                        
-                        const entry = {
-                            problem: pending.userMsg.slice(0, 200),
-                            solution: "(no AI response - user inactive)",
-                            type: "working",
-                            metadata: { 
-                                session_id: key, 
-                                role: "stale",
-                                user_timestamp: pending.timestamp,
-                                saved_timestamp: now
-                            }
-                        };
-                        
-                        await daemonCall("write", entry);
-                        console.log("[agents-memory] Auto-saved stale pending:", pending.userMsg.slice(0, 20) + "...");
-                        
-                        // Mark as saved and remove
-                        pending.saved = true;
-                        pendingUserMessages.delete(key);
-                        savePendingToFile();
-                    }
-                }
-                
-                // Read last AI response from session file
-                const lastAIResponse = getLastAssistantMessageSync(sessionKey);
-                
-                // Check if there's a pending user message from before
-                const pending = pendingUserMessages.get(sessionKey);
-                
-                if (pending && !pending.saved && lastAIResponse && lastAIResponse.length > 0) {
-                    // Pair previous user message with its AI response
-                    const pairEntry = {
-                        problem: pending.userMsg.slice(0, 200),
-                        solution: lastAIResponse.slice(0, 500),
-                        type: "working",
-                        metadata: { 
-                            session_id: sessionKey, 
-                            role: "paired",
-                            user_timestamp: pending.timestamp,
-                            ai_timestamp: Date.now()
-                        }
-                    };
-                    
-                    await daemonCall("write", pairEntry);
-                    console.log("[agents-memory] Auto-saved paired (user+AI):", pending.userMsg.slice(0, 20) + "... + AI response");
-                    
-                    // Mark as saved and remove
-                    pending.saved = true;
-                    pendingUserMessages.delete(sessionKey);
-                    savePendingToFile();
-                }
-                
-                // Store current user message as pending (awaiting AI response)
-                pendingUserMessages.set(sessionKey, {
-                    userMsg: rawMsg,
-                    timestamp: Date.now(),
-                    saved: false  // not yet saved
-                });
+                console.log("[agents-memory] Saved stale to", staleCollection);
+                p.saved = true;
+                pendingUserMessages.delete(key);
                 savePendingToFile();
-                console.log("[agents-memory] Stored pending user message:", rawMsg.slice(0, 30) + "...");
-                
-            } catch (e) {
-                console.warn("[agents-memory] Auto-save failed:", e.message);
             }
-            
-            const workingResponse = await daemonCall("search", {
-                query: query,
-                collection: "working",
-                limit: 3,
-                filter: { session_id: sessionKey }
+        }
+        
+        // ───────────────────────────────────────────────────────
+        // 3. Set current user message as PENDING (waiting for AI response)
+        // ───────────────────────────────────────────────────────
+        const currentCollection = determineCollection(rawMsg, "");
+        pendingUserMessages.set(sessionKey, {
+            userMsg: rawMsg,
+            timestamp: Date.now(),
+            saved: false,
+            collection: currentCollection
+        });
+        savePendingToFile();
+        console.log("[agents-memory] Pending set for", currentCollection, ":", rawMsg.slice(0, 30));
+        
+        // NOTE: We DON'T save immediately here.
+        // When AI responds, the NEXT user message will trigger the paired save.
+
+        const workingResponse = await daemonCall("search", {
+            query: query,
+            collection: "working",
+            limit: 3,
+            filter: { session_id: sessionKey }
+        });
+
+        const workingResults = workingResponse && workingResponse.data && workingResponse.data.data || [];
+        console.log("[agents-memory] Working:", workingResults.length, "entries");
+
+        // ───────────────────────────────────────────────────────
+        // Step 3: Check compaction threshold
+        // ───────────────────────────────────────────────────────
+        sessionTracking.msgCount++;
+
+        if (sessionTracking.msgCount >= COMPACTION_THRESHOLD) {
+            console.log("[agents-memory] Threshold reached:", sessionTracking.msgCount, "/", COMPACTION_THRESHOLD);
+            event.messages.push({
+                role: "system",
+                content: `[memory: ${sessionTracking.msgCount} messages. Threshold: ${COMPACTION_THRESHOLD}.]`
             });
-            
-            const workingResults = workingResponse && workingResponse.data && workingResponse.data.data || [];
-            console.log("[agents-memory] Working:", workingResults.length, "entries");
-            
-            // ───────────────────────────────────────────────────────
-            // Step 3: Check compaction threshold
-            // ───────────────────────────────────────────────────────
-            sessionTracking.msgCount++; // Increment for this message
-            
-            if (sessionTracking.msgCount >= COMPACTION_THRESHOLD) {
-                console.log("[agents-memory] Threshold reached:", sessionTracking.msgCount, "/", "messages");
-                
-                // Inject explicit task
-                event.messages.push({
-                    role: "system",
-                    content: `[memory: ${sessionTracking.msgCount} messages logged in 'working' collection for session ${sessionKey || 'unknown'}. Threshold: ${COMPACTION_THRESHOLD}. Consider requesting memory consolidation.]`
-                });
-            }
-            
-            // ───────────────────────────────────────────────────────
-            // Step 4: Combine results and inject
-            // ───────────────────────────────────────────────────────
-            // Laws FIRST (unconditional), then working entries
-            const allResults = [...(lawsResults || []), ...(workingResults || [])];
-            
-            if (!allResults.length) {
-                console.log("[agents-memory] No results - skipping injection");
-                return;
-            }
-            
-            const snippets = allResults.slice(0, 3).map(r => {
-                return extractSnippet(r, rawMsg);
+        }
+
+        // ───────────────────────────────────────────────────────
+        // Step 4: Combine results and inject
+        // ───────────────────────────────────────────────────────
+        const allResults = [...(lawsResults || []), ...(workingResults || [])];
+
+        if (!allResults.length) {
+            console.log("[agents-memory] No results - skipping injection");
+            return;
+        }
+
+        const snippets = allResults.slice(0, 3).map(r => extractSnippet(r, rawMsg));
+
+        let totalChars = 0;
+        let contextParts = [];
+
+        for (const snippet of snippets) {
+            if (totalChars + snippet.length + 50 > MAX_INJECT_CHARS) break;
+            contextParts.push(snippet);
+            totalChars += snippet.length + 50;
+        }
+
+        if (contextParts.length) {
+            event.messages.push({
+                role: "system",
+                content: "Relevant context:\n" + contextParts.join("\n")
             });
-            
-            let totalChars = 0;
-            let contextParts = [];
-            
-            for (let i = 0; i < snippets.length; i++) {
-                const snippet = snippets[i];
-                if (totalChars + snippet.length + 50 > MAX_INJECT_CHARS) {
-                    if (i === 0 && totalChars < MAX_INJECT_CHARS - 100) {
-                        contextParts.push(snippet);
-                        totalChars += snippet.length + 50;
-                    }
-                    break;
-                } else {
-                    contextParts.push(snippet);
-                    totalChars += snippet.length + 50;
-                }
-            }
-            
-            if (contextParts.length) {
-                const context = contextParts.join("\n");
-                event.messages.push({
-                    role: "system",
-                    content: "Relevant context:\n" + context
-                });
-                console.log(`[agents-memory] Injected ${contextParts.length} snippets (${totalChars} chars, budget=${MAX_INJECT_CHARS})`);
-            }
+            console.log("[agents-memory] Injected", contextParts.length, "snippets");
         }
     } catch (e) {
         console.warn("[agents-memory] Error:", e.message);
@@ -647,22 +696,22 @@ ALWAYS save after each response.`
 // ───────────────────────────────────────────────────────
 async function sessionCompactAfter(event) {
     console.log("[agents-memory] Session compacted, checking for learnings...");
-    
+
     const sessionKey = getSessionKey(event);
-    
+
     // Need meaningful conversation (skip if only commands were said)
     if (conversationHistory.length < 1) {
         console.log("[agents-memory] Skipping write - insufficient context");
         messageCountSinceCompact = 0;
         return;
     }
-    
+
     // ───────────────────────────────────────────────────────
     // Check if AI already saved (via PRE-LLM inject)
     // ───────────────────────────────────────────────────────
     let aiAlreadySaved = false;
     const lastUserMsg = conversationHistory[conversationHistory.length - 1];
-    
+
     if (lastUserMsg && lastUserMsg.role === "user" && shouldSaveToMemory(lastUserMsg.content)) {
         // User requested save → check if AI responded with save confirmation
         const lastAssistantText = await getLastAssistantResponseFromSession(sessionKey);
@@ -671,12 +720,12 @@ async function sessionCompactAfter(event) {
             aiAlreadySaved = true;
         }
     }
-    
+
     if (aiAlreadySaved) {
         // AI indicated it saved → just reset, don't duplicate
         conversationHistory = [];
         messageCountSinceCompact = 0;
-        
+
         // Reset compaction tracking
         const tracking = sessionCompactionTracking.get(sessionKey);
         if (tracking) {
@@ -685,13 +734,13 @@ async function sessionCompactAfter(event) {
         }
         return;
     }
-    
+
     // ───────────────────────────────────────────────────────
     // No AI save → Use sessionCompactAfter as backup storage
     // ───────────────────────────────────────────────────────
-    
+
     console.log("[agents-memory] Storing", conversationHistory.length, "conversations");
-    
+
     for (let i = 0; i < conversationHistory.length; i++) {
         const entry = conversationHistory[i];
         await daemonCall("write", {
@@ -703,11 +752,11 @@ async function sessionCompactAfter(event) {
         });
         console.log(`[agents-memory] Stored ${i + 1}/${conversationHistory.length}`);
     }
-    
+
     // Reset for next session
     conversationHistory = [];
     messageCountSinceCompact = 0;
-    
+
     // Reset compaction tracking
     const tracking = sessionCompactionTracking.get(sessionKey);
     if (tracking) {
@@ -722,16 +771,16 @@ async function sessionCompactAfter(event) {
 // ───────────────────────────────────────────────────────
 async function executeCompaction(sessionKey) {
     console.log("[agents-memory] Executing compaction for session:", sessionKey);
-    
+
     const tracking = sessionCompactionTracking.get(sessionKey);
     if (!tracking) {
         console.log("[agents-memory] No tracking for session, skipping compaction");
         return;
     }
-    
+
     const sessionMsgCount = tracking.msgCount;
     const lastCompactedCount = tracking.lastCompactedMsgCount || 0;
-    
+
     try {
         // ───────────────────────────────────────────────────────
         // Step 1: Get all messages for this session from working collection
@@ -742,59 +791,59 @@ async function executeCompaction(sessionKey) {
             limit: 100,
             filter: { session_id: sessionKey }
         });
-        
+
         const allMessages = (workingResponse && workingResponse.data && workingResponse.data.data) || [];
         console.log("[agents-memory] Retrieved", allMessages.length, "messages from working collection");
-        
+
         if (allMessages.length === 0) {
             console.log("[agents-memory] No messages to compact - skipping");
             return;
         }
-        
+
         // ───────────────────────────────────────────────────────
         // Step 2: Generate summary (ask AI to do this)
         // ───────────────────────────────────────────────────────
-        
+
         // ───────────────────────────────────────────────────────
         // Simple approach: concat messages and ask user/AI for summary
         // ───────────────────────────────────────────────────────
-        
+
         const allText = allMessages.map(m => m.content || "").join("\n\n");
         const summaryPrompt = `Based on the following conversation messages, provide a concise summary:\n\n${allText}\n\nSummary should cover: main topic, key decisions, and current status.\n\nFormat: "{Topic} - Progress" followed by bullet points.`;
-        
+
         const messagesSummary = `(Session has ${allMessages.length} messages) - Summarize all.`;
-        
+
         console.log("[agents-memory] Summary prompt:", messagesSummary);
         console.log("[agents-memory] Injecting summary prompt for AI");
-        
+
         event.messages.push({
             role: "system",
             content: summaryPrompt
         });
-        
+
         // Note: For now, we don't wait for AI response to get the summary.
         // In future, can add hook for "message:final" or use callback pattern.
-        
+
         // ───────────────────────────────────────────────────────
         // Step 3: Delete old entries and insert summary
         // ───────────────────────────────────────────────────────
-        
+
         // For now, just delete all messages for this session
         // The AI will handle summarization and create new entry
         console.log("[agents-memory] Deleting old entries from working collection for session:", sessionKey);
-        
+
         await daemonCall("delete", {
             filter: { session_id: sessionKey },
             collection: "working"
         });
-        
+
         console.log("[agents-memory] Compaction completed for session:", sessionKey);
-        
+
         // Update tracking
         tracking.msgCount = 0;
         tracking.lastCompactedMsgCount = sessionMsgCount;
         sessionCompactionTracking.set(sessionKey, tracking);
-        
+
     } catch (e) {
         console.error("[agents-memory] Compaction error:", e.message);
     }
@@ -809,15 +858,15 @@ async function handler(event) {
         globalThis._hookDebugDone = true;
         console.log("[agents-memory] FULL EVENT:", JSON.stringify(event).slice(0, 1000));
     }
-    
+
     if (event && event.type) {
         console.log("[agents-memory] Received event type:", event.type, "action:", event.action);
     }
-    
+
     const hook = event && event.type && event.action
-        ? (event.type + ":" + event.action) 
+        ? (event.type + ":" + event.action)
         : undefined;
-    
+
     if (hook === "message:preprocessed") {
         return messagePreprocessed(event);
     } else if (hook === "session:compact:after") {
