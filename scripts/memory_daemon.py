@@ -35,6 +35,10 @@ from logger import get_logger
 # Production mode: set AGENTS_MEMORY_PRODUCTION=1 to suppress debug/info logs
 PRODUCTION = os.environ.get("AGENTS_MEMORY_PRODUCTION", "").lower() in ("1", "true", "yes")
 
+# Write lock: ChromaDB is not thread-safe for concurrent writes
+# Reads (search) are safe concurrent, writes need serialization
+_write_lock = threading.Lock()
+
 log = get_logger("memory-daemon")
 
 # Suppress debug logs in production mode
@@ -299,7 +303,12 @@ def handle_search(args):
 
 
 def handle_write(args):
-    """Write new entry to memory with deduplication."""
+    """Write new entry to memory. Uses _write_lock for thread safety."""
+    with _write_lock:
+        return _handle_write_locked(args)
+
+
+def _handle_write_locked(args):
     global METRICS, CURRENT_PROJECT
     import uuid
     from datetime import datetime
@@ -369,17 +378,12 @@ def handle_write(args):
 
 
 def handle_batch_write(args):
-    """Write multiple entries to memory in one call.
-    
-    Args:
-        entries: list of {
-            problem: str,
-            solution: str (optional),
-            project: str (optional),
-            entry_type: str (optional),
-            importance: float (optional)
-        }
-    """
+    """Write multiple entries to memory in one call. Uses _write_lock for thread safety."""
+    with _write_lock:
+        return _handle_batch_write_locked(args)
+
+
+def _handle_batch_write_locked(args):
     global METRICS
     import uuid
     from datetime import datetime
