@@ -94,7 +94,7 @@ Add MCP tools to `alsoAllow` in openclaw.json:
     "servers": {
       "memory-save": {
         "command": "node",
-        "args": ["/path/to/memory-save.mjs"]
+        "args": ["/path/to/memory-save.cjs"]
       }
     }
   }
@@ -241,7 +241,7 @@ Hook collections map to daemon types:
 cp hook-packs/agents-memory/handler.js ~/.openclaw/hooks/agents-memory/
 
 # Copy MCP server
-cp mcp/memory-save.mjs ~/.openclaw/mcp/
+cp mcp/memory-save.cjs ~/.openclaw/mcp/
 
 # Add to openclaw.json:
 # 1. mcp.servers.memory-save config
@@ -269,7 +269,7 @@ systemctl --user start agents-memory-daemon.service
 - `scripts/memory_search.py` - CLI search tool
 - `hook-packs/agents-memory/handler.js` - OpenClaw hook
 - `hook-packs/agents-memory/HOOK.md` - Hook documentation
-- `mcp/memory-save.mjs` - MCP server for memory_save tool
+- `mcp/memory-save.cjs` - MCP server for memory_save tool
 
 ## Commands
 
@@ -294,9 +294,10 @@ export DAEMON_SOCK=$MEMORY_DIR/daemon.sock
 
 ## Troubleshooting
 
-### MCP "Not connected"
-- MCP server crashes after gateway restart
-- Fix: restart gateway again, check `ps aux | grep memory-save`
+### MCP "Not connected" or 30s timeout
+- **Root cause:** Old .mjs server used raw JSON-RPC. OpenClaw uses official MCP SDK which needs proper handshake.
+- **Fix:** Use memory-save.cjs (rewritten with official @modelcontextprotocol/sdk)
+- **Config:** openclaw.json must point to memory-save.cjs not .mjs
 
 ### "lawsResults is not defined"
 - Hook references undefined variable
