@@ -1,317 +1,473 @@
 # agents-memory
 
-> Universal semantic memory layer for AI CLI tools. Remembers everything, forgets nothing.
+> **Grows Longer It Runs — Persistent memory and auto-generated skills**
+>
+> It learns your projects and never forgets how it solved a problem.
+
+---
+
+## What is agents-memory?
+
+agents-memory is a universal semantic memory layer for AI CLI tools (OpenClaw, Codex, Cursor, etc.). It:
+
+- **Remembers everything** — every problem and solution is stored in ChromaDB
+- **Routes intelligently** — automatic classification into 10 collections based on content
+- **Injects context** — AI sees relevant past work before responding
+- **Auto-saves** — no manual save required after every message
+- **Scales forever** — grows smarter with every conversation
+
+---
 
 ## Quick Start
 
 ```bash
-# Install from local source
-cd /srv/apps/agents-memory
-npm pack
-npm install -g agents-memory-*.tgz
+# Install from npm
+npm install -g agents-memory
 
-# Initialize (one-time setup - installs hook, MCP, daemon, systemd service)
+# Initialize (one-time setup — installs daemon, hook, MCP, systemd service)
 agents-memory init
+
+# Restart OpenClaw gateway to load hook
+openclaw gateway restart
+
+# Done. Everything works automatically.
+```
+
+**No manual steps required.** The `init` command handles everything:
+
+1. ✅ Starts daemon via systemd user service
+2. ✅ Installs hook → `~/.openclaw/hooks/agents-memory/handler.js`
+3. ✅ Installs MCP → `~/.openclaw/mcp/memory-save.cjs`
+4. ✅ Registers MCP in `~/.openclaw/openclaw.json`
+5. ✅ Configures OpenClaw to use memory
+
+---
+
+## Pipeline (How It Works)
+
+### Message Flow
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     User sends message                         │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│           PRE-LLM HOOK (message:preprocessed)               │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │ 1. Clean up STALE pending (>2 min without response)    │   │
+│  │ 2. Set current message as PENDING                      │   │
+│  │ 3. Inject LAWS (unconditional — always present)         │   │
+│  │ 4. Search 5 collections: working, tasks, progress,     │   │
+│  │    core, important (semantic search with relevance score)│   │
+│  │ 5. Inject top results (max 5000 chars)                │   │
+│  │ 6. Inject auto-save instruction (MCP tool call)        │   │
+│  └─────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│                     AI generates response                      │
+│         (sees laws + context + auto-save instruction)         │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│           AI calls memory_save MCP tool                        │
+│      (memory-save__memory_save(problem, solution, collection))  │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│           POST-LLM HOOK (message:sent)                       │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │ 1. Pair AI response with pending user message         │   │
+│  │ 2. Classify collection (determineCollection())         │   │
+│  │ 3. Save to daemon via socket                          │   │
+│  │ 4. Mark pending as saved                              │   │
+│  └─────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│                    DAEMON (background)                        │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │ 1. Route to correct collection (type→collection map)    │   │
+│  │ 2. Generate embedding (cached for repeated queries)     │   │
+│  │ 3. Store in ChromaDB with metadata                   │   │
+│  └─────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Collections (What Goes Where)
+
+### Unified Routing (`shared/collections.json`)
+
+| Collection | Type From Hook | What It Stores | Examples |
+|------------|----------------|----------------|----------|
+| **laws** | `law` | Hard rules, guidelines, workflows | "Always restart daemon after config change" |
+| **tasks** | `solution`, `skill` | Problem → solution pairs | "How to fix nginx 502: restart php-fpm" |
+| **progress** | `summary`, `progress` | Completed work milestones | "Deployed v1.2.4 to production" |
+| **plan** | `decision` | Goals, roadmaps, future work | "Will implement OAuth2 next sprint" |
+| **core** | `baseline` | Architecture decisions, tech stack | "Use PostgreSQL for all new projects" |
+| **important** | `fact` | Important facts, preferences | "User prefers Indonesian language" |
+| **casual** | `chat` | Conversational chatter | "Thanks for the help!" |
+| **prompts** | `prompt` | User message history | "How do I restart the daemon?" |
+| **working** | `working`, `msg` | AI responses (temporary) | "Starting deployment now..." |
+| **critical** | `critical` | Time-sensitive alerts | "Database backup failed at 3AM" |
+
+### Auto-Collection Detection
+
+The hook automatically detects which collection to use based on content:
+
+```javascript
+// Laws (highest priority)
+/this is a (rule|guideline|law)/i
+/always (do|must)/i
+/never (do|must)/i
+
+// Progress
+/done|completed|fixed|solved/i
+/just did|already working/i
+
+// Plan
+/will|going to|plan to/i
+/next step|roadmap/i
+
+// Important Facts
+/remember|important|don't forget/i
+/my (name|preference)/i
+
+// Core (Architecture)
+/architecture|tech stack|project structure/i
+/baseline|core decision/i
+
+// Default: casual
+```
+
+---
+
+## Context Injection (What AI Sees)
+
+### 3-Layer Injection
+
+**Layer 1: LAWS (unconditional)**
+```system
+LAWS (always follow):
+---
+Always restart daemon after config change
+Rule confirmed: Always test after changes
+Never delete files without asking first
+```
+
+**Layer 2: Semantic Context (relevance-scored)**
+```system
+Relevant context:
+---
+[tasks] score=0.947
+Problem: nginx 502 error
+Solution: restart php-fpm and clear cache
+---
+[progress] score=0.931
+Problem: deploy v1.2.4
+Solution: Done. All services running
+---
+[core] score=0.902
+Problem: architecture decision
+Solution: Use PostgreSQL for all new projects
+```
+
+**Layer 3: Auto-Save Instruction**
+```system
+[MEM] After responding, call memory-save__memory_save(
+  problem="<summary 200chars>",
+  solution="<response 500chars>",
+  collection="tasks"
+). Required.
+```
+
+### Configuration
+
+| Setting | Value | Description |
+|---------|-------|-------------|
+| `MAX_INJECT_CHARS` | 5000 | Max context chars per message |
+| `COMPACTION_THRESHOLD` | 5 messages | When to compact working collection |
+| `semanticCollections` | 5 collections | working, tasks, progress, core, important |
+
+---
+
+## Compaction (Auto-Cleanup)
+
+After every 5 messages, the system automatically:
+
+1. Retrieves all messages from `working` collection for current session
+2. Asks AI to summarize them (via system prompt injection)
+3. Deletes old entries from `working`
+4. Saves summary to `progress` collection
+5. Resets message counter
+
+This prevents context bloat while preserving key learnings.
+
+---
+
+## Daemon (Background Service)
+
+### What It Does
+
+- Runs as systemd user service (`~/.config/systemd/user/agents-memory.service`)
+- Listens on Unix socket (`~/.memory/agents-memory/daemon.sock`)
+- Keeps embedding model loaded in memory (sentence-transformers/all-MiniLM-L6-v2)
+- Handles concurrent clients with threading
+- Caches embeddings for repeated queries (LRU, max 500 entries)
+
+### Commands
+
+```bash
+# Start daemon
+agents-memory start
+
+# Stop daemon
+agents-memory stop
+
+# Restart daemon
+agents-memory restart
+
+# Check status
+agents-memory status
+
+# View stats
+agents-memory stats
+```
+
+### Caching
+
+| Cache Type | Max Entries | TTL | Purpose |
+|------------|-------------|-----|---------|
+| Embedding | 500 | None | Reuse query embeddings across collections |
+| Query | 100 | 5 min | Cache search results for repeated queries |
+
+---
+
+## MCP Tools (What AI Can Call)
+
+### memory_save
+
+```javascript
+memory-save__memory_save({
+  problem: "Summary of what user asked (max 200 chars)",
+  solution: "AI response summary (max 500 chars)",
+  collection: "tasks"  // optional, auto-detected if omitted
+})
+```
+
+### memory_search
+
+```javascript
+memory-search__memory_search({
+  query: "nginx 502 error",
+  limit: 3,           // optional, default 5
+  collection: "tasks"  // optional, searches all if omitted
+})
+```
+
+---
+
+## CLI Commands
+
+```bash
+# Save a memory manually
+agents-memory write "problem description" -s "solution" -t tasks
+
+# Search memory
+agents-memory search "nginx 502 error"
+
+# Search specific collection
+agents-memory search "architecture" --collection core
+
+# View stats
+agents-memory stats
+
+# Garbage collection (delete stale entries)
+agents-memory gc
+
+# Initialize fresh installation
+agents-memory init
+
+# Uninstall completely
+agents-memory uninstall
+```
+
+---
+
+## Directory Structure
+
+```
+agents-memory/
+├── scripts/
+│   ├── memory_daemon.py    # Unix socket daemon
+│   ├── chroma_client.py    # ChromaDB client + search
+│   └── install-seamless.cjs # One-shot installer
+├── hooks/
+│   └── agents-memory/
+│       └── handler.js      # PRE-LLM + POST-LLM hooks
+├── hook-packs/
+│   └── agents-memory/
+│       └── handler.js      # Synced copy for npm distribution
+├── mcp/
+│   └── memory-save.cjs     # MCP server (@modelcontextprotocol/sdk)
+├── shared/
+│   └── collections.json    # Unified routing map
+├── src/
+│   └── cli.js             # CLI commands
+└── config/
+    └── settings.json      # ChromaDB + cache config
+```
+
+---
+
+## Configuration
+
+### Daemon Config (`config/settings.json`)
+
+```json
+{
+  "chroma_path": "~/.memory/chroma",
+  "persist_directory": "~/.memory/chroma",
+  "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+  "EMBEDDING_CACHE_MAX": 500,
+  "QUERY_CACHE_MAX": 100,
+  "QUERY_CACHE_TTL": 300
+}
+```
+
+### Hook Config (in code)
+
+```javascript
+const MAX_INJECT_CHARS = 5000;
+const COMPACTION_THRESHOLD = 5;
+const CACHE_TTL = 300000;  // 5 minutes
+const CACHE_MAX = 100;
+```
+
+---
+
+## Troubleshooting
+
+### Daemon not responding
+
+```bash
+# Check if daemon is running
+ps aux | grep memory_daemon
+
+# Restart
+agents-memory restart
+
+# Check socket
+ls -la ~/.memory/agents-memory/daemon.sock
+```
+
+### Hook not injecting context
+
+```bash
+# Check hook installed
+ls ~/.openclaw/hooks/agents-memory/handler.js
 
 # Restart OpenClaw gateway
 openclaw gateway restart
 
-# Save a memory
-agents-memory write "what user asked" -s "what AI answered" -t tasks
-
-# Search
-agents-memory search "query"
+# Check OpenClaw log
+tail -f /tmp/openclaw/openclaw-$(date +%Y-%m-%d).log | grep agents-memory
 ```
 
-## Architecture
-
-```
-User Message → PRE-LLM Hook
-                    ↓
-           ┌──────────────────┐
-           │ 1. Detect type   │
-           │ 2. Set pending   │
-           │ 3. Search memory │
-           │ 4. Inject context│
-           │ 5. Inject auto-  │
-           │    save instruction│
-           └──────────────────┘
-                    ↓
-           AI generates response
-                    ↓
-           AI calls memory_save MCP tool
-                    ↓
-           Saved to correct collection
-```
-
-### Save Flow (3 layers)
-
-**Layer 1: MCP Tool (primary)**
-- AI calls `memory-save__memory_save` after every response
-- Collection determined by user message content
-- Fast, direct, reliable
-
-**Layer 2: Hook Pending (backup)**
-- PRE-LLM hook sets pending user message
-- On next user message, pairs with AI response from session file
-- Catches responses AI forgot to save
-
-**Layer 3: session:compact:after (cleanup)**
-- Fires after compaction
-- Saves any remaining pending messages
-- Pairs with AI response from session file
-
-### MCP Tools
-
-**memory_save** - Save to semantic memory
-```
-memory-save__memory_save(
-  problem: "<user msg summary, max 200 chars>",
-  solution: "<AI response summary, max 500 chars>",
-  collection: "tasks" | "progress" | "plan" | "working"
-)
-```
-
-**memory_search** - Query memory
-```
-memory-search__memory_search(
-  query: "search query",
-  collections: ["tasks", "progress"],
-  limit: 5
-)
-```
-
-### OpenClaw Config Required
-
-Add MCP tools to `alsoAllow` in openclaw.json:
-```json
-{
-  "agents": {
-    "list": [{
-      "alsoAllow": [
-        "memory_save",
-        "memory_search",
-        "exec", "read", "write", ...
-      ]
-    }]
-  },
-  "mcp": {
-    "servers": {
-      "memory-save": {
-        "command": "node",
-        "args": ["/path/to/memory-save.cjs"]
-      }
-    }
-  }
-}
-```
-
-## Collections
-
-Both user AND AI go to the **same collection** based on user message content.
-
-### Complete Collection Reference
-
-#### laws
-**When:** User explicitly says "make this a rule/guideline/workflow"
-
-User is instructing AI to always follow a certain behavior. This is the HIGHEST priority collection because it's an explicit directive.
-
-**Keywords:** `make this a rule`, `make this a guideline`, `make this a workflow`, `always do`, `never do`, `this is a rule`, `must do`, `should always`
-
-**Example:** "Make this your workflow: when I ask to fix a bug, first check logs, then check recent changes"
-
----
-
-#### tasks
-**When:** User asks how to do something or has a problem to solve
-
-This is for learning and knowledge capture - how to solve specific problems, step-by-step processes, explanations.
-
-**Keywords:** `how to`, `how do`, `what is`, `what are`, `why does`, `why did`, `explain`, `help me`, `i need to`, `i want to`, `fix`, `debug`, `can you`, `could you`, `would you`, `please`, `implement`, `create`, `build`, `make`, `develop`, `setup`, `configure`
-
-**Example:** "how do I fix the memory leak in the daemon?"
-
----
-
-#### progress
-**When:** Task completed or milestone reached
-
-Captures what was accomplished. Use for tracking completed work, finished tasks, bugs fixed, features implemented.
-
-**Keywords:** `done`, `finished`, `completed`, `fixed`, `solved`, `working now`, `its working`, `just finished`, `already done`, `success`, `updated`, `changed`, `modified`, `improved`
-
-**Example:** "Fixed the collection mapping bug - tasks now go to tasks collection instead of casual"
-
----
-
-#### plan
-**When:** Future intentions, roadmap, or next steps
-
-Captures what will be done, intended actions, or planned work. Use for tracking future goals.
-
-**Keywords:** `will`, `going to`, `plan to`, `intend to`, `next step`, `next phase`, `roadmap`, `should do`, `need to`, `must do`, `will do`, `tomorrow`, `later`, `eventually`
-
-**Example:** "Next I'll add MCP tool support, then test the memory save flow"
-
----
-
-#### important
-**When:** Key facts, preferences, or things to remember
-
-Captures user preferences, important facts, configuration details, or critical information.
-
-**Keywords:** `remember`, `important`, `preference`, `don't forget`, `note that`, `keep in mind`, `my name`, `my preference`, `my setting`, `my config`
-
-**Example:** "Remember that I prefer Indonesian language for casual conversation"
-
----
-
-#### core
-**When:** Baseline knowledge, architecture, or foundational decisions
-
-Captures project architecture, tech stack decisions, or knowledge that forms the foundation of how things work. Rarely changes.
-
-**Keywords:** `architecture`, `project structure`, `tech stack`, `baseline`, `core decision`, `this is how we`, `this is the way we`
-
-**Example:** "The project uses Python daemon with Chroma DB for semantic memory storage"
-
----
-
-#### casual
-**When:** Casual conversation, greetings, or small talk
-
-For informal exchanges that don't contain learning or decisions.
-
-**Keywords:** `hi`, `hey`, `hello`, `thanks`, `thank you`, `ok`, `okay`, `yes`, `no`, `good`, `nice`, `yeah`, `sure`, `fine`, `cool`
-
-**Example:** "Hi!" or "Thanks for the help"
-
----
-
-#### prompts
-**When:** Default collection for questions that don't match above
-
-Catch-all for any question or statement that doesn't fit other categories. Most user messages end up here initially.
-
-**Keywords:** (none - this is the default)
-
-**Example:** "What's the weather?" or "Tell me about X"
-
----
-
-#### working
-**When:** AI responses in a paired conversation
-
-This collection stores the AI's response paired with the user's question. It's used for context when resuming conversations.
-
-**Note:** This is automatically paired with whatever collection the user message used. So if user asks "how to fix X", both go to tasks, not working.
-
----
-
-### Quick Reference Table
-
-| Collection | Priority | When | Example |
-|------------|----------|------|---------|
-| laws | 1 (highest) | Explicit rule | "Make this a rule: always check logs first" |
-| tasks | 2 | Questions/how-to | "how to fix the bug?" |
-| progress | 3 | Completed work | "Fixed the memory leak" |
-| plan | 4 | Future intentions | "Next I'll add MCP support" |
-| important | 5 | Preferences/facts | "Remember I prefer dark mode" |
-| core | 6 | Architecture | "We use Python + Chroma DB" |
-| casual | 7 | Small talk | "Thanks!" |
-| prompts | 8 (default) | Questions | "What's for lunch?" |
-| working | N/A | AI responses | (auto-paired with user) |
-
-## Type Mapping
-
-Hook collections map to daemon types:
-
-| Hook | Daemon Type | Collection |
-|------|-------------|------------|
-| `laws` | `law` | laws |
-| `tasks` | `solution` | tasks |
-| `progress` | `summary` | progress |
-| `plan` | `decision` | plan |
-| `important` | `fact` | important |
-| `core` | `baseline` | core |
-| `casual` | `chat` | casual |
-| `prompts` | `prompt` | prompts |
-| `working` | `working` | working |
-
-## Hook Installation
+### MCP tools not available
 
 ```bash
-# Copy handler to OpenClaw hooks
-cp hook-packs/agents-memory/handler.js ~/.openclaw/hooks/agents-memory/
+# Check MCP file exists
+ls ~/.openclaw/mcp/memory-save.cjs
 
-# Copy MCP server
-cp mcp/memory-save.cjs ~/.openclaw/mcp/
+# Check openclaw.json
+cat ~/.openclaw/openclaw.json | grep -A5 "memory-save"
 
-# Add to openclaw.json:
-# 1. mcp.servers.memory-save config
-# 2. alsoAllow: ["memory_save", "memory_search"]
-
-# Restart gateway
-nohup openclaw gateway restart &
+# Reload OpenClaw config
+openclaw gateway reload
 ```
 
-## Daemon
+### Search returns no results
 
 ```bash
-# Start manually
-python3 scripts/memory_daemon.py &
-
-# Or use systemd
-systemctl --user enable agents-memory-daemon.service
-systemctl --user start agents-memory-daemon.service
-```
-
-## Files
-
-- `scripts/memory_daemon.py` - Persistent daemon
-- `scripts/memory_write.py` - CLI write tool
-- `scripts/memory_search.py` - CLI search tool
-- `hook-packs/agents-memory/handler.js` - OpenClaw hook
-- `hook-packs/agents-memory/HOOK.md` - Hook documentation
-- `mcp/memory-save.cjs` - MCP server for memory_save tool
-
-## Commands
-
-```bash
-# Write
-agents-memory write "problem" -s "solution" -t tasks
-
-# Search
-agents-memory search "query" -c tasks -l 5
-
-# Stats
+# Check collection counts
 agents-memory stats
+
+# Write test entry
+agents-memory write "test problem" -s "test solution" -t working
+
+# Search again
+agents-memory search "test problem"
 ```
 
-## Environment
+---
+
+## Data Persistence
+
+### Where Data Is Stored
+
+```
+~/.memory/
+├── chroma/
+│   └── chroma.sqlite3      # All embeddings (vector DB)
+└── agents-memory/
+    ├── daemon.sock         # Unix socket
+    ├── daemon.pid          # Process ID
+    └── pending.json       # Unpaired user messages
+```
+
+### Data Never Deleted (Unless Manually)
+
+- **Laws**, **core**, **progress**: Never auto-deleted
+- **tasks**: Deleted when marked as `done`
+- **working**: Auto-compacted after 5 messages (summarized to progress)
+- **casual**, **prompts**: 30-day TTL (garbage collection)
+
+---
+
+## Development
+
+### Run from source
 
 ```bash
-export HOME=/home/user
-export MEMORY_DIR=~/.memory/agents-memory
-export DAEMON_SOCK=$MEMORY_DIR/daemon.sock
+cd /srv/apps/agents-memory
+
+# Install Python deps
+pip install -r requirements.txt
+
+# Run daemon in foreground
+python3 scripts/memory_daemon.py
+
+# Run hook (via OpenClaw)
+openclaw gateway reload
 ```
 
-## Troubleshooting
+### Build npm package
 
-### MCP "Not connected" or 30s timeout
-- **Root cause:** Old .mjs server used raw JSON-RPC. OpenClaw uses official MCP SDK which needs proper handshake.
-- **Fix:** Use memory-save.cjs (rewritten with official @modelcontextprotocol/sdk)
-- **Config:** openclaw.json must point to memory-save.cjs not .mjs
+```bash
+npm pack
+# Creates: agents-memory-1.1.4.tgz
+```
 
-### "lawsResults is not defined"
-- Hook references undefined variable
-- Fix: update to latest handler.js from repo
+### Publish to npm
 
-### message:sent not firing
-- OpenClaw webchat/tui doesn't implement outbound tracking
-- Only `message:preprocessed` and `session:compact:after` work reliably
+```bash
+npm publish
+```
 
-### Tools not showing up
-- Add `"memory_save"` and `"memory_search"` to `alsoAllow` in openclaw.json
-- Restart gateway after config change
+---
+
+## License
+
+MIT
+
+---
+
+## Credits
+
+Built for OpenClaw — The persistent memory layer that grows smarter with every conversation.
+
+**Goal**: "Grows Longer It Runs — Persistent memory and auto-generated skills — it learns your projects and never forgets how it solved a problem."

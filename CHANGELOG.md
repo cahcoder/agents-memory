@@ -73,3 +73,21 @@
 - ChromaDB integration with sentence-transformers
 - Pre-LLM and Post-LLM hooks for OpenClaw
 - Skill scripts: search, write, bootstrap, pre_llm, post_llm, gc
+
+## [1.1.5] - 2026-04-07
+
+### Added
+- **Complete README.md rewrite** — Pipeline diagram, collection routing, context injection layers, compaction flow, MCP tools, daemon details, configuration, troubleshooting, usage examples, data persistence
+- **Comprehensive Notion page** — agents-memory Complete Project Guide (137 blocks) with architecture, components, routing, pipeline, context injection, MCP tools, daemon, configuration, data persistence, troubleshooting
+- **Sample data documentation** — All 10 collections with example entries in README and Notion
+
+### Changed
+- **Version bump** — v1.1.4 → v1.1.5 for documentation completeness
+
+### Fixed
+- **Write lock** — `_write_lock` added for ChromaDB thread safety (fixes 'Already borrowed' error on concurrent writes)
+- **Source-prod sync** — All production fixes synced back to source (daemon.py, chroma_client.py, handler.js, memory-save.cjs)
+
+### Documentation
+- README.md now reflects current state (v1.1.5) with correct pipeline
+- Notion page: https://www.notion.so/agents-memory-Complete-Project-Guide-33b98a63543f81a4bf0dfdb00307791b
