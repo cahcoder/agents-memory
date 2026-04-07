@@ -21,11 +21,84 @@ agents-memory search "query"
 ## Architecture
 
 ```
-User Message → Hook → Pending → Next Message → Paired Save → Collection
-                                    ↓
-                             AI Response
-                                    ↓
-                             Same Collection
+User Message → PRE-LLM Hook
+                    ↓
+           ┌──────────────────┐
+           │ 1. Detect type   │
+           │ 2. Set pending   │
+           │ 3. Search memory │
+           │ 4. Inject context│
+           │ 5. Inject auto-  │
+           │    save instruction│
+           └──────────────────┘
+                    ↓
+           AI generates response
+                    ↓
+           AI calls memory_save MCP tool
+                    ↓
+           Saved to correct collection
+```
+
+### Save Flow (3 layers)
+
+**Layer 1: MCP Tool (primary)**
+- AI calls `memory-save__memory_save` after every response
+- Collection determined by user message content
+- Fast, direct, reliable
+
+**Layer 2: Hook Pending (backup)**
+- PRE-LLM hook sets pending user message
+- On next user message, pairs with AI response from session file
+- Catches responses AI forgot to save
+
+**Layer 3: session:compact:after (cleanup)**
+- Fires after compaction
+- Saves any remaining pending messages
+- Pairs with AI response from session file
+
+### MCP Tools
+
+**memory_save** - Save to semantic memory
+```
+memory-save__memory_save(
+  problem: "<user msg summary, max 200 chars>",
+  solution: "<AI response summary, max 500 chars>",
+  collection: "tasks" | "progress" | "plan" | "working"
+)
+```
+
+**memory_search** - Query memory
+```
+memory-search__memory_search(
+  query: "search query",
+  collections: ["tasks", "progress"],
+  limit: 5
+)
+```
+
+### OpenClaw Config Required
+
+Add MCP tools to `alsoAllow` in openclaw.json:
+```json
+{
+  "agents": {
+    "list": [{
+      "alsoAllow": [
+        "memory_save",
+        "memory_search",
+        "exec", "read", "write", ...
+      ]
+    }]
+  },
+  "mcp": {
+    "servers": {
+      "memory-save": {
+        "command": "node",
+        "args": ["/path/to/memory-save.mjs"]
+      }
+    }
+  }
+}
 ```
 
 ## Collections
@@ -167,6 +240,13 @@ Hook collections map to daemon types:
 # Copy handler to OpenClaw hooks
 cp hook-packs/agents-memory/handler.js ~/.openclaw/hooks/agents-memory/
 
+# Copy MCP server
+cp mcp/memory-save.mjs ~/.openclaw/mcp/
+
+# Add to openclaw.json:
+# 1. mcp.servers.memory-save config
+# 2. alsoAllow: ["memory_save", "memory_search"]
+
 # Restart gateway
 nohup openclaw gateway restart &
 ```
@@ -189,6 +269,7 @@ systemctl --user start agents-memory-daemon.service
 - `scripts/memory_search.py` - CLI search tool
 - `hook-packs/agents-memory/handler.js` - OpenClaw hook
 - `hook-packs/agents-memory/HOOK.md` - Hook documentation
+- `mcp/memory-save.mjs` - MCP server for memory_save tool
 
 ## Commands
 
@@ -210,3 +291,21 @@ export HOME=/home/user
 export MEMORY_DIR=~/.memory/agents-memory
 export DAEMON_SOCK=$MEMORY_DIR/daemon.sock
 ```
+
+## Troubleshooting
+
+### MCP "Not connected"
+- MCP server crashes after gateway restart
+- Fix: restart gateway again, check `ps aux | grep memory-save`
+
+### "lawsResults is not defined"
+- Hook references undefined variable
+- Fix: update to latest handler.js from repo
+
+### message:sent not firing
+- OpenClaw webchat/tui doesn't implement outbound tracking
+- Only `message:preprocessed` and `session:compact:after` work reliably
+
+### Tools not showing up
+- Add `"memory_save"` and `"memory_search"` to `alsoAllow` in openclaw.json
+- Restart gateway after config change
