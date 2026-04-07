@@ -438,17 +438,28 @@ async function messagePreprocessed(event) {
         // ───────────────────────────────────────────────────────
         // ALWAYS: Inject save prompt for every message
         // ───────────────────────────────────────────────────────
-        console.log("[agents-memory] Injecting save prompt for every message");
+        // Inject memory_save tool prompt - use exec to call memory-save
+        console.log("[agents-memory] Injecting memory_save prompt");
         event.messages.push({
             role: "system",
-            content: `[memory] IMPORTANT: After your response, save to agents-memory using exec:
+            content: `[MEMORY] IMPORTANT: After EVERY response, you MUST save to memory.
 
-~/.npm-global/bin/agents-memory write "<brief problem summary>" -s "<key outcome or decision>" -t working --metadata '{"session_id":"${sessionKey || 'default'}"}'
+Use exec tool to call:
+memory-save write "<what user asked>" -s "<what you answered or did>" -t <collection>
 
-Reply with "[memory saved]" at the end of your response.
+Collections:
+- tasks: Problem → solution pairs
+- progress: Status updates
+- plan: Goals/roadmap
+- working: Conversation highlights
 
-Example: After answering about fixing the pipeline, run:
-~/.npm-global/bin/agents-memory write "Fixed pipeline extraction issue" -s "Changed to read event.context.bodyForAgent, added cache variable, fixed snippet.length" -t working --metadata '{"session_id":"${sessionKey || 'default'}"}'`
+After exec, reply with "[memory saved]"
+
+Examples:
+- User: "how does it work?" → exec: memory-save write "Pipeline explanation" -s "Explained auto-save flow" -t tasks
+- User: "fix that bug" → exec: memory-save write "Fixed memory bug" -s "Changed to use memory-save alias" -t tasks
+
+ALWAYS save after each response.`
         });
         
         // Check cache first
