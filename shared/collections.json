@@ -1,0 +1,29 @@
+{
+  "HOOK_TO_TYPE": {
+    "laws": "law",
+    "tasks": "solution",
+    "progress": "summary",
+    "plan": "decision",
+    "core": "baseline",
+    "important": "fact",
+    "casual": "chat",
+    "prompts": "prompt",
+    "working": "working",
+    "critical": "critical"
+  },
+  "TYPE_TO_COLLECTION": {
+    "law": "laws",
+    "solution": "tasks",
+    "skill": "tasks",
+    "fact": "important",
+    "decision": "plan",
+    "baseline": "core",
+    "chat": "casual",
+    "prompt": "prompts",
+    "critical": "critical",
+    "working": "working",
+    "msg": "working",
+    "progress": "progress",
+    "summary": "progress"
+  }
+}

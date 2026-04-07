@@ -5,11 +5,16 @@
 ## Quick Start
 
 ```bash
-# Install
-npm install -g agents-memory
+# Install from local source
+cd /srv/apps/agents-memory
+npm pack
+npm install -g agents-memory-*.tgz
 
-# Start daemon
-memory_daemon.py &
+# Initialize (one-time setup - installs hook, MCP, daemon, systemd service)
+agents-memory init
+
+# Restart OpenClaw gateway
+openclaw gateway restart
 
 # Save a memory
 agents-memory write "what user asked" -s "what AI answered" -t tasks
@@ -227,7 +232,7 @@ Hook collections map to daemon types:
 | `laws` | `law` | laws |
 | `tasks` | `solution` | tasks |
 | `progress` | `summary` | progress |
-| `plan` | `decision` | progress |
+| `plan` | `decision` | plan |
 | `important` | `fact` | important |
 | `core` | `baseline` | core |
 | `casual` | `chat` | casual |

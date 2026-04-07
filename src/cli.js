@@ -528,7 +528,7 @@ program
 program
   .command('init')
   .description('Initialize agents-memory (or run setup again)')
-  .action(() => {
+  .action(async () => {
     const GREEN = '\x1b[32m';
     const RED = '\x1b[31m';
     const YELLOW = '\x1b[33m';
@@ -599,75 +599,195 @@ program
     }
 
     console.log('');
-    const memDir = path.join(os.homedir(), '.memory', 'chroma');
+    const memDir = path.join(os.homedir(), '.memory', 'agents-memory');
     fs.mkdirSync(memDir, { recursive: true });
     console.log(`${GREEN}✅${RESET} Memory directory: ${memDir}`);
 
-    // Create AGENTS.md in current working directory
-    console.log('');
-    console.log(`${CYAN}📝 Creating AGENTS.md in current directory:${RESET}`);
-    const cwd = process.cwd();
-    const agentsPath = path.join(cwd, 'AGENTS.md');
-
-    const memorySection = `
-
----
-
-## Semantic Memory
-
-### Memory Setup
-\`\`\`bash
-export MEMORY_DIR="$HOME/.memory/chroma"
-export SKILL_DIR="~/.npm-global/lib/node_modules/agents-memory/skill"
-\`\`\`
-
-### PRE-LLM Hook (Before AI thinks)
-\`\`\`bash
-agents-memory pre "{task description}"
-\`\`\`
-When results found, inject them into context.
-
-### POST-LLM Hook (After AI responds)
-\`\`\`bash
-agents-memory post "{problem solved}" "{solution}"
-\`\`\`
-Only store generic patterns, not specific values.
-
-### Essential Commands
-- \`agents-memory search <query>\`  - Search memory
-- \`agents-memory write <problem> <solution>\` - Store learning
-- \`agents-memory bootstrap <project>\` - Init project memory
-`;
-
-    if (fs.existsSync(agentsPath)) {
-      const content = fs.readFileSync(agentsPath, 'utf8');
-      if (content.includes('## Semantic Memory') || content.includes('agents-memory')) {
-        console.log(`${YELLOW}⚠${RESET} AGENTS.md already has semantic memory section - skipped`);
-      } else {
-        fs.appendFileSync(agentsPath, memorySection);
-        console.log(`${GREEN}✅${RESET} Appended semantic memory to AGENTS.md`);
+    // Find the daemon script path
+    const possibleDaemonPaths = [
+      path.join(__dirname, '..', 'scripts', 'memory_daemon.py'),
+      path.join(os.homedir(), '.npm-global', 'lib', 'node_modules', 'agents-memory', 'scripts', 'memory_daemon.py')
+    ];
+    let daemonPath = null;
+    for (const p of possibleDaemonPaths) {
+      if (fs.existsSync(p)) {
+        daemonPath = p;
+        break;
       }
-    } else {
-      fs.writeFileSync(agentsPath, `# Semantic Memory\n${memorySection}\n`);
-      console.log(`${GREEN}✅${RESET} Created AGENTS.md with semantic memory`);
     }
+
+    if (!daemonPath) {
+      console.error(`${RED}❌ Daemon script not found${RESET}`);
+      return;
+    }
+    console.log(`${GREEN}✅${RESET} Daemon script found: ${daemonPath}`);
+
+    // Create systemd service
+    console.log('');
+    console.log(`${CYAN}⚙️  Creating systemd service:${RESET}`);
+    const systemdDir = path.join(os.homedir(), '.config', 'systemd', 'user');
+    fs.mkdirSync(systemdDir, { recursive: true });
+    const serviceContent = `[Unit]
+Description=agents-memory Semantic Memory Daemon
+After=network.target
+
+[Service]
+Type=simple
+Environment="AGENTS_MEMORY_PRODUCTION=1"
+ExecStart=${PY_CMD} ${daemonPath} --daemon
+Restart=on-failure
+RestartSec=5
+StandardOutput=null
+StandardError=null
+
+[Install]
+WantedBy=default.target
+`;
+    const servicePath = path.join(systemdDir, 'agents-memory.service');
+    fs.writeFileSync(servicePath, serviceContent);
+    console.log(`${GREEN}✅${RESET} Service file: ${servicePath}`);
+
+    // Reload systemd and enable/start service
+    try {
+      execSync('systemctl --user daemon-reload', { stdio: 'pipe' });
+      execSync('systemctl --user enable agents-memory.service', { stdio: 'pipe' });
+      execSync('systemctl --user start agents-memory.service', { stdio: 'pipe' });
+      console.log(`${GREEN}✅${RESET} Daemon started via systemd`);
+    } catch (e) {
+      // Fallback: start manually
+      console.log(`${YELLOW}⚠${RESET} systemd not available, starting daemon manually...`);
+      try {
+        spawn('setsid', [PY_CMD, daemonPath, '--daemon'], {
+          detached: true,
+          stdio: 'ignore',
+          shell: false
+        }).unref();
+        console.log(`${GREEN}✅${RESET} Daemon started in background`);
+      } catch (e2) {
+        console.error(`${RED}❌ Failed to start daemon${RESET}`);
+      }
+    }
+
+    // Wait for daemon to be ready
+    const sockPath = path.join(os.homedir(), '.memory', 'agents-memory', 'daemon.sock');
+    const maxWait = 30;
+    let daemonReady = false;
+    for (let i = 0; i < maxWait; i++) {
+      await new Promise(r => setTimeout(r, 1000));
+      if (fs.existsSync(sockPath)) {
+        daemonReady = true;
+        break;
+      }
+    }
+    if (daemonReady) {
+      console.log(`${GREEN}✅${RESET} Daemon socket ready`);
+    } else {
+      console.log(`${YELLOW}⚠${RESET} Daemon may still be starting (model loading takes time)`);
+    }
+
+    // Install OpenClaw hook
+    console.log('');
+    console.log(`${CYAN}🪝 Installing OpenClaw hook:${RESET}`);
+    const hookDir = path.join(os.homedir(), '.openclaw', 'hooks', 'agents-memory');
+    fs.mkdirSync(hookDir, { recursive: true });
+
+    // Find hook source
+    const hookSrcPaths = [
+      path.join(__dirname, '..', 'hooks', 'agents-memory', 'handler.js'),
+      path.join(__dirname, '..', 'hook-packs', 'agents-memory', 'handler.js'),
+      path.join(os.homedir(), '.npm-global', 'lib', 'node_modules', 'agents-memory', 'hooks', 'agents-memory', 'handler.js')
+    ];
+    let hookSrc = null;
+    for (const p of hookSrcPaths) {
+      if (fs.existsSync(p)) {
+        hookSrc = p;
+        break;
+      }
+    }
+    if (hookSrc) {
+      const hookDest = path.join(hookDir, 'handler.js');
+      fs.copyFileSync(hookSrc, hookDest);
+      console.log(`${GREEN}✅${RESET} Hook installed: ${hookDest}`);
+    } else {
+      console.error(`${RED}❌ Hook handler.js not found${RESET}`);
+    }
+
+    // Install MCP server
+    console.log('');
+    console.log(`${CYAN}🔌 Installing MCP server:${RESET}`);
+    const mcpDir = path.join(os.homedir(), '.openclaw', 'mcp');
+    fs.mkdirSync(mcpDir, { recursive: true });
+
+    const mcpSrcPaths = [
+      path.join(__dirname, '..', 'mcp', 'memory-save.cjs'),
+      path.join(os.homedir(), '.npm-global', 'lib', 'node_modules', 'agents-memory', 'mcp', 'memory-save.cjs')
+    ];
+    let mcpSrc = null;
+    for (const p of mcpSrcPaths) {
+      if (fs.existsSync(p)) {
+        mcpSrc = p;
+        break;
+      }
+    }
+    if (mcpSrc) {
+      const mcpDest = path.join(mcpDir, 'memory-save.cjs');
+      fs.copyFileSync(mcpSrc, mcpDest);
+      console.log(`${GREEN}✅${RESET} MCP installed: ${mcpDest}`);
+    } else {
+      console.error(`${RED}❌ memory-save.cjs not found${RESET}`);
+    }
+
+    // Update openclaw.json
+    console.log('');
+    console.log(`${CYAN}⚙️  Updating OpenClaw config:${RESET}`);
+    const openclawCfg = path.join(os.homedir(), '.openclaw', 'openclaw.json');
+    let openclawConfig = {};
+    if (fs.existsSync(openclawCfg)) {
+      try {
+        openclawConfig = JSON.parse(fs.readFileSync(openclawCfg, 'utf8'));
+      } catch (e) {
+        console.warn(`${YELLOW}⚠${RESET} Could not parse openclaw.json, creating new`);
+      }
+    }
+
+    // Add MCP server entry
+    if (!openclawConfig.mcp) openclawConfig.mcp = {};
+    if (!openclawConfig.mcp.servers) openclawConfig.mcp.servers = {};
+    const mcpDestPath = path.join(mcpDir, 'memory-save.cjs');
+    openclawConfig.mcp.servers['memory-save'] = {
+      command: 'node',
+      args: [mcpDestPath]
+    };
+
+    // Add to alsoAllow if not present
+    const ALLOW_KEYS = ['memory_save', 'memory_search'];
+    if (openclawConfig.agents && openclawConfig.agents.list) {
+      for (const agent of openclawConfig.agents.list) {
+        if (!agent.alsoAllow) agent.alsoAllow = [];
+        for (const k of ALLOW_KEYS) {
+          if (!agent.alsoAllow.includes(k)) agent.alsoAllow.push(k);
+        }
+      }
+    }
+
+    fs.writeFileSync(openclawCfg, JSON.stringify(openclawConfig, null, 2));
+    console.log(`${GREEN}✅${RESET} openclaw.json updated`);
 
     console.log('');
     console.log(`${CYAN}╔══════════════════════════════════════════╗${RESET}`);
     console.log(`${CYAN}║${RESET}   ✅ agents-memory ready!            ${CYAN}║${RESET}`);
     console.log(`${CYAN}╚══════════════════════════════════════════╝${RESET}`);
     console.log('');
-    console.log(`${YELLOW}📚 Other commands:${RESET}`);
+    console.log(`${YELLOW}📚 Quick commands:${RESET}`);
     console.log(`   agents-memory search <query>  - Search memory`);
     console.log(`   agents-memory write <prob> <sol>  - Store learning`);
-    console.log(`   agents-memory gc          - Run garbage collection`);
-    console.log(`   agents-memory uninstall  - Complete uninstall`);
+    console.log(`   agents-memory gc          - Garbage collection`);
     console.log('');
-    console.log(`${YELLOW}🔧 Cleanup / Reset:${RESET}`);
-    console.log(`   # Fresh reinstall (keep config, reset memory):`);
-    console.log(`   systemctl --user stop agents-memory-daemon`);
-    console.log(`   rm -rf ~/.memory/chroma/`);
-    console.log(`   systemctl --user start agents-memory-daemon`);
+    console.log(`${YELLOW}🔄 Next steps:${RESET}`);
+    console.log(`   1. Restart OpenClaw gateway:`);
+    console.log(`      openclaw gateway restart`);
+    console.log(`   2. Or reload config:`);
+    console.log(`      openclaw gateway reload`);
     console.log('');
   });
 

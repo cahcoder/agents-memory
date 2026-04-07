@@ -270,18 +270,26 @@ def expand_query(query: str) -> str:
 
 def _search_single_collection(args):
     """Worker function for parallel collection search.
-    Args: tuple of (col_name, query, limit, where, client, ef)
+    Args: tuple of (col_name, query, limit, where, client, ef, query_embeddings=None)
     Returns: list of result dicts
     """
-    col_name, query, limit, where, client, ef = args
+    col_name, query, limit, where, client, ef = args[:6]
+    query_embeddings = args[6] if len(args) > 6 else None
     results = []
     try:
         collection = client.get_collection(name=col_name, embedding_function=ef)
-        query_results = collection.query(
-            query_texts=[query],
-            n_results=limit,
-            where=where if where else None,
-        )
+        if query_embeddings:
+            query_results = collection.query(
+                query_embeddings=query_embeddings,
+                n_results=limit,
+                where=where if where else None,
+            )
+        else:
+            query_results = collection.query(
+                query_texts=[query],
+                n_results=limit,
+                where=where if where else None,
+            )
 
         documents = query_results.get("documents", [[]])[0]
         metadatas = query_results.get("metadatas", [[]])[0]
@@ -422,7 +430,7 @@ def _score_result(entry, query="", recency_weight=0.05):
     return score
 
 
-def search_memory(query, project=None, entry_type=None, limit=5, collection=None, use_expansion=True):
+def search_memory(query, project=None, entry_type=None, limit=5, collection=None, use_expansion=True, where=None):
     """Search across collections with optimized scoring and optional query expansion.
     
     Args:
@@ -432,6 +440,7 @@ def search_memory(query, project=None, entry_type=None, limit=5, collection=None
         limit: Maximum results to return
         collection: If specified, search only this collection (string). Otherwise search all.
         use_expansion: If True, expand query with synonyms for better recall (default: True)
+        where: Additional where filter dict (e.g. {"session_id": "xyz"})
     
     Returns:
         List of results sorted by weighted score (similarity + priority + importance + recency)
@@ -448,13 +457,17 @@ def search_memory(query, project=None, entry_type=None, limit=5, collection=None
                 f"Query expanded: '{original_query}' -> '{query}'"
             )
 
+    # Build base where filter
+    base_where = dict(where) if where else {}
+    if project:
+        base_where["project"] = project
+    if entry_type:
+        base_where["entry_type"] = entry_type
+
     # Single collection: direct call (no ThreadPool overhead)
     if collection:
         single_result = _search_single_collection(
-            (collection, query, limit, {
-                **({"project": project} if project else {}),
-                **({"entry_type": entry_type} if entry_type else {})
-            }, client, ef)
+            (collection, query, limit, base_where if base_where else None, client, ef)
         )
         # Score and sort (pass query for keyword cross-validation)
         for entry in single_result:
@@ -465,15 +478,12 @@ def search_memory(query, project=None, entry_type=None, limit=5, collection=None
     # Multiple collections: parallel search with ThreadPoolExecutor
     collections_to_query = list(COLLECTIONS)
 
-    where = {}
-    if project:
-        where["project"] = project
-    if entry_type:
-        where["entry_type"] = entry_type
+    # Pre-compute embedding ONCE for all collections (major optimization)
+    precomputed_embedding = ef([query]) if ef else None
 
-    # Build args for each collection
+    # Build args for each collection (pass precomputed embedding to all)
     worker_args = [
-        (col_name, query, limit, where, client, ef)
+        (col_name, query, limit, base_where if base_where else None, client, ef, precomputed_embedding)
         for col_name in collections_to_query
     ]
 

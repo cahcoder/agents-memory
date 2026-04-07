@@ -20,6 +20,7 @@ import signal
 import time
 import hashlib
 import logging
+import threading
 from pathlib import Path
 from collections import OrderedDict
 
@@ -245,12 +246,14 @@ def handle_search(args):
     METRICS["cache_misses"] += 1
     
     # Execute search
+    session_id = args.get("session_id") or (args.get("filter") or {}).get("session_id")
     results = search_memory(
         query=query,
         project=project,
         entry_type=entry_type,
         limit=limit,
-        collection=collection
+        collection=collection,
+        where={"session_id": session_id} if session_id else None
     )
     
     # Track metrics
@@ -287,6 +290,14 @@ def handle_write(args):
         METRICS["writes_rejected"] += 1
         raise ValueError("problem must not be empty")
 
+    # Input size validation
+    MAX_PROBLEM = 10000
+    MAX_SOLUTION = 50000
+    if len(problem) > MAX_PROBLEM:
+        problem = problem[:MAX_PROBLEM]
+    if solution and len(solution) > MAX_SOLUTION:
+        solution = solution[:MAX_SOLUTION]
+
     content_parts = [f"Problem: {problem}"]
     if solution:
         content_parts.append(f"Solution: {solution}")
@@ -296,7 +307,15 @@ def handle_write(args):
     # The hook marks pending as saved=true after saving, preventing duplicates
     # This avoids expensive get(limit=1000) that causes memory issues
 
-    # No duplicate found, create new entry
+    type_to_collection = {
+        "solution": "tasks", "skill": "tasks", "fact": "important",
+        "decision": "plan", "baseline": "core", "chat": "casual",
+        "prompt": "prompts", "critical": "critical", "law": "laws",
+        "working": "working", "msg": "working",
+        "progress": "progress", "summary": "progress"
+    }
+    collection_name = type_to_collection.get(entry_type, "casual")
+
     metadata = {
         "project": project,
         "entry_type": entry_type,
@@ -309,6 +328,7 @@ def handle_write(args):
     if metadata_args:
         metadata.update(metadata_args)
     
+    collection = client.get_or_create_collection(name=collection_name, embedding_function=ef)
     entry_id = str(uuid.uuid4())
     collection.add(ids=[entry_id], documents=[content], metadatas=[metadata])
 
@@ -341,8 +361,8 @@ def handle_batch_write(args):
 
     type_to_collection = {
         "solution": "tasks", "skill": "tasks", "fact": "important",
-        "decision": "progress", "baseline": "core", "chat": "casual",
-        "prompt": "prompts", "critical": "critical",
+        "decision": "plan", "baseline": "core", "chat": "casual",
+        "prompt": "prompts", "critical": "critical", "law": "laws",
         "working": "working", "msg": "working",
         "progress": "progress", "summary": "progress"
     }
@@ -600,11 +620,12 @@ def run_daemon():
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGHUP, reload_handler)
 
-    # Accept loop
+    # Accept loop - spawn thread per connection for concurrency
     while True:
         try:
             conn, _ = sock.accept()
-            handle_client(conn)
+            t = threading.Thread(target=handle_client, args=(conn,), daemon=True)
+            t.start()
         except Exception:
             pass
 

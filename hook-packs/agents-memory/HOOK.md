@@ -28,7 +28,7 @@ The hook sends types that the daemon maps to collections:
 |----------------|-------------|---------|
 | `tasks` | `solution` | tasks |
 | `progress` | `summary` | progress |
-| `plan` | `decision` | progress |
+| `plan` | `decision` | plan |
 | `important` | `fact` | important |
 | `core` | `baseline` | core |
 | `laws` | `law` | laws |
