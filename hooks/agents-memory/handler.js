@@ -566,20 +566,20 @@ async function messageSent(event) {
             // We have a pending user message and its collection
             // Save AI response to WORKING and also to the determined collection
             
-            // Save to working (AI response)
+            // Save to working (AI response) — FULL, no truncation
             await daemonCall("write", {
-                problem: pending.userMsg.slice(0, 200),
-                solution: aiResponse.slice(0, 500),
+                problem: pending.userMsg,
+                solution: aiResponse,
                 type: "working",
                 metadata: { session_id: sessionKey, role: "ai_response" }
             });
-            console.log("[agents-memory] Saved AI response to working");
+            console.log("[agents-memory] Saved AI response to working (full, no truncation)");
             
-            // Also save to the pending collection (user's question + AI response)
+            // Also save to the pending collection (user's question + AI response) — FULL
             const type = COLLECTION_MAP[pending.collection] || pending.collection;
             await daemonCall("write", {
-                problem: pending.userMsg.slice(0, 200),
-                solution: aiResponse.slice(0, 500),
+                problem: pending.userMsg,
+                solution: aiResponse,
                 type: type,
                 metadata: { session_id: sessionKey, role: "paired", original_collection: pending.collection }
             });
@@ -674,7 +674,7 @@ After saving, respond with "[memory compacted]"`
                 const staleCollection = determineCollection(p.userMsg, "");
                 const staleType = COLLECTION_MAP[staleCollection] || staleCollection;
                 await daemonCall("write", {
-                    problem: p.userMsg.slice(0, 200),
+                    problem: p.userMsg,
                     solution: "(no AI response - user inactive)",
                     type: staleType,
                     metadata: { session_id: key, role: "stale", original_collection: staleCollection }
@@ -764,7 +764,7 @@ After saving, respond with "[memory compacted]"`
         // MANDATORY: Auto-save instruction via memory_save MCP tool
         // ───────────────────────────────────────────────────────
         const userMsgType = determineCollection(rawMsg, "");
-        const autoSaveInstruction = `[MEM] After responding, call memory-save__memory_save(problem="<summary 200chars>", solution="<response 500chars>", collection="${userMsgType}"). Required.`;
+        const autoSaveInstruction = `[MEM] After responding, call memory-save__memory_save(problem="${pending.userMsg}", solution="${aiResponse}", collection="${userMsgType}"). Required.`;
         event.messages.push({
             role: "system",
             content: autoSaveInstruction
@@ -803,18 +803,18 @@ async function sessionCompactAfter(event) {
         const collection = pending.collection || "working";
         const type = COLLECTION_MAP[collection] || collection;
         
-        // Save paired entry to the determined collection
+        // Save paired entry to the determined collection — FULL, no truncation
         await daemonCall("write", {
-            problem: pending.userMsg.slice(0, 200),
-            solution: aiResponse.slice(0, 500),
+            problem: pending.userMsg,
+            solution: aiResponse,
             type: type,
             metadata: { session_id: key, role: "paired_compact", original_collection: collection }
         });
         
-        // Also save AI response to working
+        // Also save AI response to working — FULL, no truncation
         await daemonCall("write", {
-            problem: pending.userMsg.slice(0, 200),
-            solution: aiResponse.slice(0, 500),
+            problem: pending.userMsg,
+            solution: aiResponse,
             type: "working",
             metadata: { session_id: key, role: "ai_response_compact" }
         });
@@ -839,8 +839,8 @@ async function sessionCompactAfter(event) {
         for (let i = 0; i < conversationHistory.length; i++) {
             const entry = conversationHistory[i];
             await daemonCall("write", {
-                problem: entry.content.slice(0, 200),
-                solution: "",
+                problem: entry.content,
+                solution: entry.content || "",
                 type: "learning",
                 project: event.context && event.context.project || null,
                 metadata: { session_id: sessionKey }
